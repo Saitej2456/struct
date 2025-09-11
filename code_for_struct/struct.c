@@ -61,7 +61,7 @@ void update_path(char *cpath, char *addon)
         else
         {
             int k = i;
-            for(int j = 0 ; j < NAME_MAX ; j++)
+            for(int j = 0 ; j < PATH_MAX ; j++)
             {
                 if(addon[j] != '\0')
                 {
@@ -81,6 +81,60 @@ void update_path(char *cpath, char *addon)
     }
 }
 
+//function to generate a new path with current path and addon
+int generate_path(char *rpath, char *cpath, char *addon)
+{
+    int index_of_null = 0;
+    for(int i = 0 ; i <= PATH_MAX ; i++)
+    {
+        if(i == PATH_MAX)
+        {
+            index_of_null = i;
+            rpath[i] = '\0';
+            printf("\nPath size is overflowing...\ncancelling creation of file...\n");
+            //TODO implement handling for file path exceding case 
+            break;
+        }
+        if(cpath[i] == '\0')
+        {
+            index_of_null = i;
+            rpath[i] = cpath[i];
+            break;
+        }
+        else
+        {
+            rpath[i] = cpath[i];
+            continue;
+        }
+    }
+
+    int j = 0;
+    for(int i = index_of_null; i <= PATH_MAX; i++)
+    {
+        if(i == PATH_MAX)
+        {
+            index_of_null = i;
+            rpath[i] = '\0';
+            printf("\npath size is overflowing...\ncancelling creation of file...\n");
+            //TODO implement handling for file path exceding case 
+            break;
+        }
+        if(addon[j] == '\0')
+        {
+            index_of_null = i;
+            rpath[i] = addon[j];
+            break;      
+        }
+        else
+        {
+            rpath[i] = addon[j];
+            j++;
+        }
+    }
+
+    return index_of_null;
+}
+
 //function to create a file
 int create_file(char *cpath)
 {
@@ -94,55 +148,9 @@ int create_file(char *cpath)
     printf("Enter the name of the file : ");
     scanf(" %[^\n]%*c" ,fname);
     
-    int index_of_null = 0;
-    for(int i = 0 ; i <= PATH_MAX ; i++)
-    {
-        if(i == PATH_MAX)
-        {
-            index_of_null = i;
-            fpath[i] = '\0';
-            printf("\nPath size is overflowing...\ncancelling creation of file...\n");
-            //TODO implement handling for file path exceding case 
-            break;
-        }
-        if(cpath[i] == '\0')
-        {
-            index_of_null = i;
-            fpath[i] = cpath[i];
-            break;
-        }
-        else
-        {
-            fpath[i] = cpath[i];
-            continue;
-        }
-    }
-
-    int j = 0;
-    for(int i = index_of_null; i <= PATH_MAX; i++)
-    {
-        if(i == PATH_MAX)
-        {
-            index_of_null = i;
-            fpath[i] = '\0';
-            printf("\npath size is overflowing...\ncancelling creation of file...\n");
-            //TODO implement handling for file path exceding case 
-            break;
-        }
-        if(fname[j] == '\0')
-        {
-            index_of_null = i;
-            fpath[i] = fname[j];
-            break;      
-        }
-        else
-        {
-            fpath[i] = fname[j];
-            j++;
-        }
-    }
-
+    generate_path(fpath, cpath, fname);
     printf("\n%s",fpath);
+
 	FILE *fptr;
 	if(access(fpath,F_OK) == 0)
 	{
@@ -169,55 +177,9 @@ int create_directory(char *cpath)
     printf("Enter the name of the directory : ");
     scanf(" %[^\n]%*c" ,dname);
     
-    int index_of_null = 0;
-    for(int i = 0 ; i <= PATH_MAX ; i++)
-    {
-        if(i == PATH_MAX)
-        {
-            index_of_null = i;
-            dpath[i] = '\0';
-            printf("\nPath size is overflowing...\ncancelling creation of file...\n");
-            //TODO implement handling for directory path exceeding case 
-            break;
-        }
-        if(cpath[i] == '\0')
-        {
-            index_of_null = i;
-            dpath[i] = cpath[i];
-            break;
-        }
-        else
-        {
-            dpath[i] = cpath[i];
-            continue;
-        }
-    }
-
-    int j = 0;
-    for(int i = index_of_null; i <= PATH_MAX; i++)
-    {
-        if(i == PATH_MAX)
-        {
-            index_of_null = i;
-            dpath[i] = '\0';
-            printf("\npath size is overflowing...\ncancelling creation of file...\n");
-            //TODO implement handling for file path exceding case 
-            break;
-        }
-        if(dname[j] == '\0')
-        {
-            index_of_null = i;
-            dpath[i] = dname[j];
-            break;      
-        }
-        else
-        {
-            dpath[i] = dname[j];
-            j++;
-        }
-    }
-
+    generate_path(dpath,cpath,dname);
     printf("\n%s",dpath);
+    
 	if(!mkdir(dpath,0755))
 	{
 		return DIR_CREATED;
@@ -245,9 +207,9 @@ int main()
         int choice_of_struct = 0;
 
         //string used to store the path of presently operating directory [used when creating a structure]
-        char path[PATH_MAX] = "\0";
+        char path[PATH_MAX] = "./structures/\0";
 
-        //TODO call the function which clears the terminal by priting a lot of new lines
+        clear_terminal();
         printf("1. Create a structure");
         printf("\n2. Use a structure");
         printf("\n3. Remove a structure");
