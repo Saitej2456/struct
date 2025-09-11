@@ -275,6 +275,34 @@ int create_directory(char *cpath)
 	}
 }
 
+//function to remove a file 
+void remove_file(char *fpath)
+{
+    int ret_val = existance_checker(fpath);
+    if( ret_val == IS_FILE)
+    {
+        remove(fpath);
+    }
+    else if(ret_val == FILE_NEXISTS)
+    {
+        printf("No such file exists");
+    }
+}
+
+//function to remove a directory
+void remove_dir(char *dpath)
+{
+    int ret_val = existance_checker(dpath);
+    if( ret_val == IS_DIR)
+    {
+        remove(dpath);
+    }
+    else if(ret_val == FILE_NEXISTS)
+    {
+        printf("No such Directory exists");
+	}
+}
+
 
 //TODO create a function which will take a message [string] along with the during it should be shown onto the terminal  
 
@@ -336,11 +364,15 @@ int main()
                             printf("\nfeature not available yet\n");                
                             break;
                         case 4:
-                            //TODO Update the path string
+                            //TODO Update the path string to forwad
+                            char tname[NAME_MAX]="\0";
+                            scanf(" %[^\n]%*c",tname);
+                            update_path(path,tname,FORWARD);
                             printf("\nfeature not available yet\n");                
                             break;
                         case 5:
-                            //TODO Update the path string
+                            //TODO Update the path string to backward
+                            update_path(path,"\0",BACKWARD);
                             printf("\nfeature not available yet\n");                
                             break;
                         case 6:
