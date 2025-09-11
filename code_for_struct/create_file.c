@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <unistd.h>
-#include <string.h>
+#define F_OK 0
 #define FILE_EXISTS 1
 #define FILE_CREATED 0
 
