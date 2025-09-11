@@ -32,7 +32,210 @@ int run_create = 1;
 
 /*Functions section*/
 
-//TODO create the function which clears the terminal by priting a lot of new lines
+//Utility functions
+
+//function which will create the illusion of clearing the terminal by printing a lot of "\n" [new line charecters] 
+void clear_terminal()
+{
+    printf("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
+}
+
+void fancy_path(char * path)
+{
+    printf("\n");
+    printf("<<<<< Curr path : ");
+    printf("%s >>>>>\n",path);
+}
+
+//Functions core to the program
+
+//function to update the path
+void update_path(char *cpath, char *addon)
+{
+    for(int i = 0 ; i < PATH_MAX ; i++)
+    {
+        if(cpath[i] != '\0')
+        {
+            continue;
+        }
+        else
+        {
+            int k = i;
+            for(int j = 0 ; j < NAME_MAX ; j++)
+            {
+                if(addon[j] != '\0')
+                {
+                    cpath[k] = addon[j];
+                    k++;
+                    continue;
+                }
+                else
+                {
+                    cpath[k] = addon[j];
+                    k++;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+}
+
+//function to create a file
+int create_file(char *cpath)
+{
+    //string which stores the name of the file to create the file
+    char fname[NAME_MAX]="\0";
+
+    //string which is used to store the path of the file to be created
+    char fpath[PATH_MAX]="\0";
+    
+    clear_terminal();
+    printf("Enter the name of the file : ");
+    scanf(" %[^\n]%*c" ,fname);
+    
+    int index_of_null = 0;
+    for(int i = 0 ; i <= PATH_MAX ; i++)
+    {
+        if(i == PATH_MAX)
+        {
+            index_of_null = i;
+            fpath[i] = '\0';
+            printf("\nPath size is overflowing...\ncancelling creation of file...\n");
+            //TODO implement handling for file path exceding case 
+            break;
+        }
+        if(cpath[i] == '\0')
+        {
+            index_of_null = i;
+            fpath[i] = cpath[i];
+            break;
+        }
+        else
+        {
+            fpath[i] = cpath[i];
+            continue;
+        }
+    }
+
+    int j = 0;
+    for(int i = index_of_null; i <= PATH_MAX; i++)
+    {
+        if(i == PATH_MAX)
+        {
+            index_of_null = i;
+            fpath[i] = '\0';
+            printf("\npath size is overflowing...\ncancelling creation of file...\n");
+            //TODO implement handling for file path exceding case 
+            break;
+        }
+        if(fname[j] == '\0')
+        {
+            index_of_null = i;
+            fpath[i] = fname[j];
+            break;      
+        }
+        else
+        {
+            fpath[i] = fname[j];
+            j++;
+        }
+    }
+
+    printf("\n%s",fpath);
+	FILE *fptr;
+	if(access(fpath,F_OK) == 0)
+	{
+        printf("\nfile already exists!\ncancelling file creation...\n");
+		return FILE_EXISTS;
+	}
+	else
+	{
+		fopen(fpath,"w");
+		return FILE_CREATED;
+	}
+}
+
+//function to create a directory
+int create_directory(char *cpath)
+{
+    //string which stores the name of the directory to create the directory
+    char dname[NAME_MAX]="\0";
+
+    //string which is used to store the path of the directory to be created
+    char dpath[PATH_MAX]="\0";
+    
+    clear_terminal();
+    printf("Enter the name of the directory : ");
+    scanf(" %[^\n]%*c" ,dname);
+    
+    int index_of_null = 0;
+    for(int i = 0 ; i <= PATH_MAX ; i++)
+    {
+        if(i == PATH_MAX)
+        {
+            index_of_null = i;
+            dpath[i] = '\0';
+            printf("\nPath size is overflowing...\ncancelling creation of file...\n");
+            //TODO implement handling for directory path exceeding case 
+            break;
+        }
+        if(cpath[i] == '\0')
+        {
+            index_of_null = i;
+            dpath[i] = cpath[i];
+            break;
+        }
+        else
+        {
+            dpath[i] = cpath[i];
+            continue;
+        }
+    }
+
+    int j = 0;
+    for(int i = index_of_null; i <= PATH_MAX; i++)
+    {
+        if(i == PATH_MAX)
+        {
+            index_of_null = i;
+            dpath[i] = '\0';
+            printf("\npath size is overflowing...\ncancelling creation of file...\n");
+            //TODO implement handling for file path exceding case 
+            break;
+        }
+        if(dname[j] == '\0')
+        {
+            index_of_null = i;
+            dpath[i] = dname[j];
+            break;      
+        }
+        else
+        {
+            dpath[i] = dname[j];
+            j++;
+        }
+    }
+
+    printf("\n%s",dpath);
+	if(!mkdir(dpath,0755))
+	{
+		return DIR_CREATED;
+	}
+	else if(errno == EEXIST)
+	{
+        printf("\nDirectory already exists\n");
+		return DIR_EXISTS;
+	}
+	else
+	{
+		return -1;
+	}
+}
+
+
+//TODO create a function which will take a message [string] along with the during it should be shown onto the terminal  
+
 
 int main()
 {   
@@ -56,12 +259,14 @@ int main()
         switch (choice_of_struct)
         {
             case 1:
+
                 while(run_create == 1)
                 {
                     //variable used to know which operation needs to be performed while creating a structure 
                     int choice_of_operation = 0;
 
-                    //TODO call the function which clears the terminal by priting a lot of new lines
+                    // clear_terminal();
+                    fancy_path(path);
                     printf("1. Create a file");
                     printf("\n2. Create a directory");
                     printf("\n3. Create a script file");
@@ -71,19 +276,18 @@ int main()
                     printf("\n7. Remove a directory");
                     printf("\n8. Rename a file");
                     printf("\n9. Renanme a directory");
-                    printf("\n10. End making a structuren\n");
+                    printf("\n10. List current path contents");
+                    printf("\n11. End making a structure\n");
                     printf("\n\nEnter your choice : ");
                     scanf("%d",&choice_of_operation);
 
                     switch (choice_of_operation)
                     {
                         case 1:
-                            //TODO Embed Create a file code
-                            printf("\nfeature not available yet\n");                
+                            create_file(path);
                             break;
                         case 2:
-                            //TODO Embed Create a directory code
-                            printf("\nfeature not available yet\n");                
+                            create_directory(path);
                             break;
                         case 3:
                             //TODO Embed Create file with script flag code here
@@ -114,6 +318,10 @@ int main()
                             printf("\nfeature not available yet\n");                
                             break;
                         case 10:
+                            //TODO Create a function to list the contents in the shown path
+                            printf("\nfeature not available yet\n");
+                            break;
+                        case 11:
                             run_create = 0;
                             break;
                         default:
