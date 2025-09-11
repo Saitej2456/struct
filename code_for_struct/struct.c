@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dirent.h>
 
 /*Macros section*/
 
@@ -11,14 +12,28 @@
 #define F_OK 0
 //Confirmation of existance of a file
 #define FILE_EXISTS 1
+//Confimration of non existance of a file
+#define FILE_NEXISTS -2
 //Confirmation of new creation of a file
 #define FILE_CREATED 0
-//error code for directory existance
+//Info that the check is for file
+#define FILE_C 1
+//Info that the check is for directory
+#define DIR_C 0
+//Error code for directory existance
 #define EEXIST 17
 //Confirmation of existance of a directory
 #define DIR_EXISTS 1
 //Confirmation of creation of a directory
 #define DIR_CREATED 0
+//Movement representor [forward]
+#define FORWARD 1 
+//Movement representor [backward]
+#define BACKWARD -1
+//Confirmation of file
+#define IS_FILE 1
+//Confirmation of directory 
+#define IS_DIR 0
 
 
 /*Global variable section*/
@@ -49,8 +64,64 @@ void fancy_path(char * path)
 
 //Functions core to the program
 
-//function to update the path
-void update_path(char *cpath, char *addon)
+//function to check existance of a file or directory 
+int existance_checker(char *tpath)
+{
+    DIR *dirptr;
+    if (access (tpath, F_OK) != -1 ) 
+    {
+        if ((dirptr = opendir (tpath)) != NULL) 
+        {
+            closedir (dirptr); 
+            return IS_DIR;
+        } 
+        else 
+        {
+            return IS_FILE; 
+        }
+    } 
+    else 
+    {
+        return FILE_NEXISTS;  
+    }
+
+}
+
+//function to update the path [move between directories]
+void update_path(char *cpath, char *addon, int movement)
+{
+    if(movement == -1)
+    {
+        int lastbefore_backslash_index = 0;
+        for(int i = 0 ; i < PATH_MAX; i++)
+        {
+            if(cpath[i] == '/')
+            {
+                if(cpath[i+1] != '\0')
+                {
+                    lastbefore_backslash_index = i;
+                }
+                else
+                {
+                    for(int j = lastbefore_backslash_index+1 ; j < NAME_MAX ; j++)
+                    {
+                        if(cpath[j] != '\0')
+                        {
+                            cpath[j] = '\0';
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+    
+                    break;
+                }
+            }
+        }
+    }
+
+    else if (movement == 1)
 {
     for(int i = 0 ; i < PATH_MAX ; i++)
     {
@@ -71,12 +142,21 @@ void update_path(char *cpath, char *addon)
                 }
                 else
                 {
+                        cpath[k] = '/';
+                        k++;
                     cpath[k] = addon[j];
                     k++;
                     break;
                 }
+                }
+
+                if(existance_checker(cpath) == -2)
+                {
+                    update_path(cpath,"\0",BACKWARD);
+                    printf("\nNo such directory exists\n");
             }
             break;
+            }
         }
     }
 }
