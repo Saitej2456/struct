@@ -1,6 +1,25 @@
 /*Headers section*/
 #include <stdio.h>
 #include <linux/limits.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+/*Macros section*/
+
+//Test for existence.
+#define F_OK 0
+//Confirmation of existance of a file
+#define FILE_EXISTS 1
+//Confirmation of new creation of a file
+#define FILE_CREATED 0
+//error code for directory existance
+#define EEXIST 17
+//Confirmation of existance of a directory
+#define DIR_EXISTS 1
+//Confirmation of creation of a directory
+#define DIR_CREATED 0
+
 
 /*Global variable section*/
 
