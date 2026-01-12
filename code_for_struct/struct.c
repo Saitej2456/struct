@@ -34,6 +34,24 @@
 #define IS_FILE 1
 //Confirmation of directory 
 #define IS_DIR 0
+//Information that file is a script file
+#define IS_SCRIPT 1
+//Information that file is not a script file
+#define IS_NSCRIPT -1
+//Information that path updator doesn't require /
+#define NONEEDFS -1
+//Information that path updator requires /
+#define NEEDFS 1
+//Confirmation that file has been removed
+#define FILE_REMOVED 1
+//Confirmation that file has been removed
+#define FILE_NREMOVED -1
+//Confirmation that directory has been removed
+#define DIR_REMOVED 1
+//Confirmation that file has been renamed
+#define FILE_RENAMED 1
+//Confirmation that directory has been renamed
+#define DIR_RENAMED 1
 
 
 /*Global variable section*/
@@ -44,10 +62,24 @@
 int run = 1;
 //variable used to tell the program whether to continue creating a structure of not once an operation is done
 int run_create = 1;
+//variable used to tell the create directory functio if teh directory is being created for structure or not
+int dir_is_struct = 0;
+//charecter pointers used for referencing strings if returning is hard 
+char *gen_cpointer = NULL;
+//charecter string used for path genral use case [try to avoid highly inefficient everytime usage is done the whole string should be cleared]
+char gen_pathstring[PATH_MAX] = "\0";
 
 /*Functions section*/
 
 //Utility functions
+
+//function which will go to the next instruction upon clicking enter
+void confirm_wait()
+{
+    char confirm;
+    printf("\nType q and ENTER to go back : ");
+    scanf(" %c",&confirm);
+}
 
 //function which will create the illusion of clearing the terminal by printing a lot of "\n" [new line charecters] 
 void clear_terminal()
@@ -55,6 +87,7 @@ void clear_terminal()
     printf("\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n");
 }
 
+//function which will print the current working path 
 void fancy_path(char * path)
 {
     printf("\n");
@@ -62,7 +95,94 @@ void fancy_path(char * path)
     printf("%s >>>>>\n",path);
 }
 
+//function which will clear all the charecters that may currently exist in the "char gen_pathstring[PATH_MAX]"
+void clear_pathstring()
+{
+    for(int i = 0 ; i < PATH_MAX; i++)
+    {
+        gen_pathstring[i] = '\0';
+    }
+}
+
+//create a function to give text formating
+
 //Functions core to the program
+
+//Function which will store the relative path to given path from mentioned number of ancestor directory in the char gen_pathstring[PATH_MAX]
+//
+//Note : it doesn't store a backslash when it is storing the result and there is no restriction of whether there should or shouldn't be a forwardslash at the end
+int ansc_rel_path(char * cpath, int ancestor_number)
+{
+    //The array which stores the indexes of the backslashes it encountered. Expanded as [back_slash_index]
+    int bsi[PATH_MAX];
+    int bsi_pointer = 0;
+    int required_backslash_index = 0;
+    int lastbefore_backslash_index = 0;
+
+    //This variable will be acting like a boolean for determining whether forward slash exists at the end of cpath or not.
+    //
+    //0 represents forward slash doesn't exist
+    //1 represents forward slash exists
+    int fse = 0;
+    for(int i = 0 ; i < PATH_MAX; i++)
+    {
+        if(cpath[i] == '/')
+        {
+            if(cpath[i+1] != '\0')
+            {
+                bsi[bsi_pointer] = i;
+                bsi_pointer++;
+                continue;
+            }
+            else
+            {
+                bsi[bsi_pointer] = i;
+                lastbefore_backslash_index = i;
+                fse=1;
+                break;
+            }
+        }
+        else if(cpath[i] == '\0')
+        {
+            bsi_pointer--;
+            if(bsi_pointer == -1)
+            {
+                printf("no forward slashes found error");
+                return -2;
+            }
+            lastbefore_backslash_index = bsi[bsi_pointer];
+            fse=0;
+            break;
+        }
+    }
+
+    if(fse == 1)
+    {
+        //This is the index of bsi[PATH_MAX] which will be storing the actual index location of the required backslash in cpath string
+        int req_sindex = bsi_pointer - ancestor_number;
+        required_backslash_index = bsi[req_sindex];
+        int k = 0;
+        for(int i = required_backslash_index+1; i<lastbefore_backslash_index; i++)
+        {
+            gen_pathstring[k] = cpath[i];
+            k++;
+        }
+    }
+    else if (fse == 0)
+    {
+        //This is the index of bsi[PATH_MAX] which will be storing the actual index location of the required backslash in cpath string
+        //
+        //Note : ancestor-1 is taken because the bsi_pointer without forward slash at the end of cpath string, will be pointing to the forward slash which would be second last if a forward slash was there
+        int req_sindex = bsi_pointer - (ancestor_number-1);
+        required_backslash_index = bsi[req_sindex];
+        int k = 0;
+        for(int i = required_backslash_index+1; i<PATH_MAX; i++)
+        {
+            gen_pathstring[k] = cpath[i];
+            k++;
+        }
+    }
+} 
 
 //function to check existance of a file or directory 
 int existance_checker(char *tpath)
@@ -88,7 +208,7 @@ int existance_checker(char *tpath)
 }
 
 //function to update the path [move between directories]
-void update_path(char *cpath, char *addon, int movement)
+void update_path(char *cpath, char *addon, int movement, int slash_flag)
 {
     if(movement == -1)
     {
@@ -142,16 +262,25 @@ void update_path(char *cpath, char *addon, int movement)
                     }
                     else
                     {
-                        cpath[k] = '/';
-                        k++;
-                        cpath[k] = addon[j];
-                        break;
+                        if(slash_flag == NEEDFS)
+                        {
+                            cpath[k] = '/';
+                            k++;
+                            cpath[k] = addon[j];
+                            break;
+                        }
+                        else if (slash_flag == NONEEDFS)
+                        {
+                            cpath[k] = addon[j];
+                            k++;
+                            break;
+                        }
                     }
                 }
 
                 if(existance_checker(cpath) == -2)
                 {
-                    update_path(cpath,"\0",BACKWARD);
+                    update_path(cpath,"\0",BACKWARD,NEEDFS);
                     printf("\nNo such directory exists\n");
                 }
                 break;
@@ -215,8 +344,10 @@ int generate_path(char *rpath, char *cpath, char *addon)
 }
 
 //function to create a file
-int create_file(char *cpath)
+int create_file(char *cpath,int script_flag)
 {
+    //TODO make handling script files more efficient 
+
     //string which stores the name of the file to create the file
     char fname[NAME_MAX]="\0";
 
@@ -224,11 +355,21 @@ int create_file(char *cpath)
     char fpath[PATH_MAX]="\0";
     
     clear_terminal();
-    printf("Enter the name of the file : ");
+    if(script_flag == IS_SCRIPT)
+    {
+        printf("Enter the name of the script file wtihout \".sh\" extention : ");
+    }
+    else if (script_flag == IS_NSCRIPT)
+    {
+        printf("Enter the name of the file : ");
+    }
     scanf(" %[^\n]%*c" ,fname);
     
     generate_path(fpath, cpath, fname);
-    printf("\n%s",fpath);
+    if(script_flag == IS_SCRIPT)
+    {
+        generate_path(fpath,fpath,".sh");
+    }
 
 	FILE *fptr;
 	if(access(fpath,F_OK) == 0)
@@ -253,29 +394,55 @@ int create_directory(char *cpath)
     char dpath[PATH_MAX]="\0";
     
     clear_terminal();
-    printf("Enter the name of the directory : ");
+    if(dir_is_struct ==  0)
+    {
+        printf("Enter the name of the directory : ");
+    }
+    else if (dir_is_struct == 1)
+    {
+        printf("Enter the name of the structure : ");
+    }
+    
     scanf(" %[^\n]%*c" ,dname);
-    
-    generate_path(dpath,cpath,dname);
-    printf("\n%s",dpath);
-    
-	if(!mkdir(dpath,0755))
-	{
-		return DIR_CREATED;
-	}
-	else if(errno == EEXIST)
-	{
-        printf("\nDirectory already exists\n");
-		return DIR_EXISTS;
-	}
-	else
-	{
-		return -1;
-	}
+    if(dir_is_struct ==  0)
+    {
+        generate_path(dpath,cpath,dname);
+        if(!mkdir(dpath,0755))
+        {
+            return DIR_CREATED;
+        }
+        else if(errno == EEXIST)
+        {
+            printf("\nDirectory already exists\n");
+            return DIR_EXISTS;
+        }
+        else
+        {
+            return -1;
+        }
+    }
+    else if (dir_is_struct == 1)
+    {
+        generate_path(gen_pathstring,cpath,dname);
+        if(!mkdir(gen_pathstring,0755))
+        {
+            return DIR_CREATED;
+        }
+        else if(errno == EEXIST)
+        {
+            printf("\nStructure already exists\n");
+            return DIR_EXISTS;
+        }
+        else
+        {
+            return -1;
+        }
+    }
+	
 }
 
 //function to remove a file 
-void remove_file(char *cpath)
+int remove_file(char *cpath)
 {
     clear_terminal();
     char fpath[PATH_MAX]="\0";
@@ -288,15 +455,16 @@ void remove_file(char *cpath)
     if( ret_val == IS_FILE)
     {
         remove(fpath);
+        return FILE_REMOVED;
     }
     else if(ret_val == FILE_NEXISTS)
     {
-        printf("No such file exists");
+        return FILE_NREMOVED;
     }
 }
 
 //function to remove a directory
-void remove_dir(char *dpath)
+int remove_dir(char *dpath)
 {
     int ret_val = existance_checker(dpath);
     
@@ -333,11 +501,10 @@ void remove_dir(char *dpath)
                 }
                 else
                 {
-                    //TODO normal case
                     char tpath_in[PATH_MAX]="\0";
                     char tpath_out[PATH_MAX]="\0";
                     generate_path(tpath_in,dpath,"\0");
-                    update_path(tpath_in,dir->d_name,FORWARD);
+                    update_path(tpath_in,dir->d_name,FORWARD,NEEDFS);
                     generate_path(tpath_out,dpath,dir->d_name);
                     if (existance_checker(tpath_out) == IS_FILE)
                     {
@@ -351,6 +518,7 @@ void remove_dir(char *dpath)
             }            
             closedir(d);
             rmdir(dpath);
+            return DIR_REMOVED;
         }
     }
     if(ret_val == IS_FILE)
@@ -360,21 +528,21 @@ void remove_dir(char *dpath)
 }
 
 //function to rename a file/directory
-void rename_FD(char *cpath, int FoD)
+int rename_FD(char *cpath, int FoD)
 {
     clear_terminal();
     char oldname[NAME_MAX]="\0";
     char oldpath[PATH_MAX]="\0";
     char newname[NAME_MAX]="\0";
     char newpath[PATH_MAX]="\0";
-    if(FoD = IS_FILE)
+    if(FoD == IS_FILE)
     {
         printf("Enter old file name here : ");
         scanf(" %[^\n]%*c",oldname);
         printf("\n\nEnter new file name here : ");
         scanf(" %[^\n]%*c",newname);
     }
-    if(FoD = IS_DIR)
+    if(FoD == IS_DIR)
     {
         printf("Enter old directory name here : ");
         scanf(" %[^\n]%*c",oldname);
@@ -384,11 +552,297 @@ void rename_FD(char *cpath, int FoD)
     generate_path(oldpath,cpath,oldname);
     generate_path(newpath,cpath,newname);
     rename(oldpath,newpath);
+    if(FoD == IS_FILE)
+    {
+        return FILE_RENAMED;
+    }
+    if(FoD == IS_DIR)
+    {
+       return DIR_RENAMED; 
+    }
 }
 
+//function to list all the files in a directory
+void list_contents(char *cpath)
+{
+    DIR *d;
+    struct dirent *dir;
+    d = opendir(cpath);
+    if(d)
+    {
+        clear_terminal();
+        while((dir = readdir(d)) != NULL)
+        {
+            printf("\n%s",dir->d_name);
+        }
+        confirm_wait();
+        closedir(d);
+        dir = NULL;
+    }
+}
+
+// function to copy a file from one place to another place 
+void copy_file(char *destpath, char *srcpath)
+{
+    char buffer[512] = "\0";
+    size_t buffer_size = sizeof(buffer)/sizeof(buffer[0]);
+    size_t bytes_read = 0;
+
+    FILE *src_file = fopen(srcpath,"r");
+    if(src_file == NULL)
+    {
+        perror("Source file opening failed");
+    }
+    FILE *dest_file = fopen(destpath,"w+");
+    if(dest_file == NULL)
+    {
+        perror("Destination file opening failed");
+    }
+
+    while((bytes_read=fread(buffer,sizeof(char),buffer_size,src_file))>0)
+    {
+        fwrite(buffer, sizeof(char), bytes_read, dest_file);
+    }
+
+    fclose(src_file);
+    fclose(dest_file);
+
+    src_file = dest_file = NULL;
+}
+
+// function to copy a directory from one place to the other with contents recursively
+void copy_dir(char *dest_path, char *dpath)
+{
+    // TODO maintain the current path inside the directory
+    // TODO create new path for contentw both for destination and source
+
+    int ret_val = existance_checker(dpath); 
+    if(ret_val == FILE_NEXISTS)
+    {
+        printf("No such Directory or File exists\nCancelling request\n");
+    }
+    else if(ret_val == IS_DIR)
+    {
+        DIR *d;
+        struct dirent *dir;
+        d = opendir(dpath);
+        if(d)
+        {
+            //string which stores the path of the file/dir from source
+            char tpath_s[PATH_MAX]="\0";
+
+            //string which stores the path of the file/dir from destination
+            char tpath_d[PATH_MAX]="\0";
+            
+            generate_path(tpath_d,dest_path,"\0");
+            update_path(dpath,"\0",FORWARD,NEEDFS);
+            ansc_rel_path(dpath,1);
+            update_path(tpath_d,gen_pathstring,FORWARD,NEEDFS);
+            clear_pathstring();
+            generate_path(tpath_s,dpath,"\0");
+            if(!mkdir(tpath_d,0755))
+            {
+                //tester for checking directory creation
+                if(0)
+                {
+                    printf("\n%s Directory created\n",tpath_d);
+                }
+            }
+            else if(errno == EEXIST)
+            {
+                printf("\n%s Directory already exists\n",tpath_d);
+                return DIR_EXISTS;
+            }
+            else
+            {
+                printf("\nunkown error occured while creating directory %s\n",tpath_d);
+                return -1;
+            }
+
+            while((dir = readdir(d)) != NULL)
+            {
+                if(dir->d_name[0] == '.')
+                {
+                    if(dir->d_name[1] == '.')
+                    {
+                        if(dir->d_name[2] == '\0')
+                        {
+                            continue;
+                        }    
+                    }
+                    else if(dir->d_name[1] == '\0')
+                    {
+                        continue;
+                    }
+                    else
+                    {
+                        //TODO hidden directory case
+                    }
+                }
+                else
+                {
+                    //string which stores the path of the file/dir from source
+                    char ttpath_s[PATH_MAX]="\0";
+                    generate_path(ttpath_s,tpath_s,"\0");
+                    update_path(ttpath_s,dir->d_name,FORWARD,NONEEDFS);
+                    copy_dir(tpath_d,ttpath_s);
+                }
+            }            
+            closedir(d);
+            return DIR_REMOVED;
+        }
+    }
+    if(ret_val == IS_FILE)
+    {
+        remove(dpath);
+    }
+
+}
+
+// function used to do operations in a strcuture 
+void operator(char *cpath)
+{
+    while(run_create == 1)
+    {
+        clear_terminal();
+
+        //variable used to know which operation needs to be performed while creating a structure 
+        int choice_of_operation = 0;
+
+        // clear_terminal();
+        fancy_path(cpath);
+        printf("1. Create a file");
+        printf("\n2. Create a directory");
+        printf("\n3. Create a script file");
+        printf("\n4. Move into a directory");
+        printf("\n5. Move to parent directory");
+        printf("\n6. Remove a file");
+        printf("\n7. Remove a directory");
+        printf("\n8. Rename a file");
+        printf("\n9. Renanme a directory");
+        printf("\n10. List current path contents");
+        printf("\n11. End making a structure\n");
+        printf("\n\nEnter your choice : ");
+        scanf("%d",&choice_of_operation);
+
+        switch (choice_of_operation)
+        {
+            case 1:
+            {
+                int temp = create_file(cpath,IS_NSCRIPT);
+                clear_terminal();
+                if(temp == FILE_CREATED)
+                {
+                    printf("file successfully created");
+                }
+                break;
+            }
+            case 2:
+            {
+                int temp = create_directory(cpath);
+                clear_terminal();
+                if(temp == DIR_CREATED)
+                {
+                    printf("directory successfully created");
+                }
+                break;
+            }
+            case 3:
+            {
+                int temp = create_file(cpath,IS_SCRIPT);
+                clear_terminal();
+                if(temp == FILE_CREATED)
+                {
+                    printf("script file successfully created");
+                }
+                break;
+            }
+            case 4:
+            {
+                char tname[NAME_MAX]="\0";
+                clear_terminal();
+                printf("Enter the name of the directory : ");
+                scanf(" %[^\n]%*c",tname);
+                update_path(cpath,tname,FORWARD,NEEDFS);
+                break;
+            }
+            case 5:
+            {
+                update_path(cpath,"\0",BACKWARD,NEEDFS);
+                break;
+            }
+            case 6:
+            {
+                int temp = remove_file(cpath);
+                clear_terminal();
+                if(temp == FILE_REMOVED)
+                {
+                    printf("file removed successfully");
+                }
+                else if(temp == FILE_NREMOVED)
+                {
+                    printf("file was not removed");
+                }
+                break;
+            }
+            case 7:
+            {
+                char dname[NAME_MAX]="\0";
+                clear_terminal();
+                printf("\nEnter the directory name :\n");
+                scanf(" %[^\n]%*c",dname);
+                char dpath[PATH_MAX]="\0";
+                generate_path(dpath,cpath,"\0");
+                update_path(dpath,dname,FORWARD,NEEDFS);
+                if (remove_dir(dpath) == DIR_REMOVED)
+                {
+                    clear_terminal();
+                    printf("Directory removed succesfully");
+                }
+                break;
+            }
+            case 8:
+            {
+                if(rename_FD(cpath,IS_FILE) == FILE_RENAMED)
+                {
+                    clear_terminal();
+                    printf("File has been successfully renamed");
+                }          
+                break;
+            }
+            case 9:
+            {
+                if(rename_FD(cpath,IS_DIR) == DIR_RENAMED)
+                {
+                    clear_terminal();
+                    printf("Directory has been successfully renamed");
+                }
+                
+                break;
+            }
+            case 10:
+            {
+                list_contents(cpath);
+                break;
+            }
+            case 11:
+            {
+                run_create = 0;
+                break;
+            }
+            default:
+            {
+                printf("\nfound invalid operation number, please enter a valid one\n");
+                break;
+            }
+        }
+    }  
+    run_create = 1;  
+    return;
+}
 
 //TODO create a function which will take a message [string] along with the during it should be shown onto the terminal  
-//TODO make a function which will go to the next instruction upon clicking enter
+
 
 int main()
 {   
@@ -412,136 +866,64 @@ int main()
         switch (choice_of_struct)
         {
             case 1:
-
-                while(run_create == 1)
-                {
-                    //variable used to know which operation needs to be performed while creating a structure 
-                    int choice_of_operation = 0;
-
-                    // clear_terminal();
-                    fancy_path(path);
-                    printf("1. Create a file");
-                    printf("\n2. Create a directory");
-                    printf("\n3. Create a script file");
-                    printf("\n4. Move into a directory");
-                    printf("\n5. Move to parent directory");
-                    printf("\n6. Remove a file");
-                    printf("\n7. Remove a directory");
-                    printf("\n8. Rename a file");
-                    printf("\n9. Renanme a directory");
-                    printf("\n10. List current path contents");
-                    printf("\n11. End making a structure\n");
-                    printf("\n\nEnter your choice : ");
-                    scanf("%d",&choice_of_operation);
-
-                    switch (choice_of_operation)
-                    {
-                        case 1:
-                        {
-                            create_file(path);
-                            break;
-                        }
-                        case 2:
-                        {
-                            create_directory(path);
-                            break;
-                        }
-                        case 3:
-                        {
-                            //TODO Embed Create file with script flag code here
-                            printf("\nfeature not available yet\n");                
-                            break;
-                        }
-                        case 4:
-                        {
-                            char tname[NAME_MAX]="\0";
-                            scanf(" %[^\n]%*c",tname);
-                            update_path(path,tname,FORWARD);
-                            break;
-                        }
-                        case 5:
-                        {
-                            update_path(path,"\0",BACKWARD);
-                            break;
-                        }
-                        case 6:
-                        {
-                            remove_file(path);
-                            break;
-                        }
-                        case 7:
-                        {
-                            char dname[NAME_MAX]="\0";
-                            clear_terminal();
-                            printf("\nEnter the directory name :\n");
-                            scanf(" %[^\n]%*c",dname);
-                            char dpath[PATH_MAX]="\0";
-                            generate_path(dpath,path,"\0");
-                            update_path(dpath,dname,FORWARD);
-                            remove_dir(dpath);
-                            break;
-                        }
-                        case 8:
-                        {
-                            rename_FD(path,IS_FILE);          
-                            break;
-                        }
-                        case 9:
-                        {
-                            rename_FD(path,IS_DIR);
-                            break;
-                        }
-                        case 10:
-                        {
-                            DIR *d;
-                            struct dirent *dir;
-                            d = opendir(path);
-                            if(d)
-                            {
-                                clear_terminal();
-                                while((dir = readdir(d)) != NULL)
-                                {
-                                    printf("\n%s",dir->d_name);
-                                }
-                                char confirm;
-                                scanf(" %c",&confirm);
-                                closedir(d);
-                                dir = NULL;
-                            }
-                            break;
-                        }
-                        case 11:
-                        {
-                            run_create = 0;
-                            break;
-                        }
-                        default:
-                        {
-                            printf("\nfound invalid operation number, please enter a valid one\n");
-                            break;
-                        }
-                    }
-                }    
+            {
+                char sname[NAME_MAX]="\0";
+                dir_is_struct = 1;
+                create_directory(path);
+                dir_is_struct = 0;
+                operator(gen_pathstring);
+                clear_pathstring(); 
                 break;
+            }
             case 2:
+            {
                 //TODO write code for using the created structures
                 printf("\nfeature not available yet\n");
                 break;
+            }
             case 3:
+            {
                 //TODO write code for removing created strctures 
+                char sname[NAME_MAX]="\0";
+                list_contents(path);
+                clear_terminal();
+                printf("\nEnter the structure name to remove : ");
+                scanf(" %[^\n]%*c",sname);
+                //TODO check if empty string can remove structrues directory
+                char spath[PATH_MAX]="\0";
+                generate_path(spath,path,"\0");
+                update_path(spath,sname,FORWARD,NEEDFS);
+                if (remove_dir(spath) == DIR_REMOVED)
+                {
+                    clear_terminal();
+                    printf("Structure removed succesfully");
+                }
                 printf("\nfeature not available yet\n");                
                 break;
+            }
             case 4:
+            {
                 //TODO edit code for editing existing strctures
+                char sname[NAME_MAX]="\0";
+                list_contents(path);
+                printf("\nEnter the structure name to edit :");
+                scanf(" %[^\n]%*c",sname);
+                update_path(path,sname,FORWARD,NEEDFS);
+                operator(path);
                 printf("\nfeature not available yet\n");                
                 break;
+            }    
             case 5:
+            {
                 printf("\n<<<< exiting the program >>>>\n");
                 run = 0;                
                 break;
+            }
             default:
+            {
                 printf("\nfound invalid operation number, please enter a valid one\n");
                 break;
+            }
         }
     }
     
