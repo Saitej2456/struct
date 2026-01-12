@@ -24,6 +24,8 @@
 #define EEXIST 17
 //Confirmation of existance of a directory
 #define DIR_EXISTS 1
+//Confimration of non existance of a directory
+#define DIR_NEXISTS -2
 //Confirmation of creation of a directory
 #define DIR_CREATED 0
 //Movement representor [forward]
@@ -76,6 +78,7 @@ char gen_pathstring[PATH_MAX] = "\0";
 //function which will go to the next instruction upon clicking enter
 void confirm_wait()
 {
+    //TODO bug gound : when you are typing more than a character unexpected things are occuring
     char confirm;
     printf("\nType q and ENTER to go back : ");
     scanf(" %c",&confirm);
@@ -208,7 +211,7 @@ int existance_checker(char *tpath)
 }
 
 //function to update the path [move between directories]
-void update_path(char *cpath, char *addon, int movement, int slash_flag)
+int update_path(char *cpath, char *addon, int movement, int slash_flag)
 {
     if(movement == -1)
     {
@@ -282,6 +285,7 @@ void update_path(char *cpath, char *addon, int movement, int slash_flag)
                 {
                     update_path(cpath,"\0",BACKWARD,NEEDFS);
                     printf("\nNo such directory exists\n");
+                    return DIR_NEXISTS;
                 }
                 break;
             }
@@ -611,10 +615,10 @@ void copy_file(char *destpath, char *srcpath)
 }
 
 // function to copy a directory from one place to the other with contents recursively
-void copy_dir(char *dest_path, char *dpath)
+int copy_dir(char *dest_path, char *dpath)
 {
     // TODO maintain the current path inside the directory
-    // TODO create new path for contentw both for destination and source
+    // TODO create new path for content both for destination and source
 
     int ret_val = existance_checker(dpath); 
     if(ret_val == FILE_NEXISTS)
@@ -883,34 +887,41 @@ int main()
             }
             case 3:
             {
-                //TODO write code for removing created strctures 
                 char sname[NAME_MAX]="\0";
                 list_contents(path);
                 clear_terminal();
                 printf("\nEnter the structure name to remove : ");
                 scanf(" %[^\n]%*c",sname);
-                //TODO check if empty string can remove structrues directory
+                //TODO bug found : when a non existant name is given as input it removes the structures folder itself
                 char spath[PATH_MAX]="\0";
                 generate_path(spath,path,"\0");
-                update_path(spath,sname,FORWARD,NEEDFS);
-                if (remove_dir(spath) == DIR_REMOVED)
+                if(update_path(spath,sname,FORWARD,NEEDFS) == DIR_NEXISTS)
+                {
+                    confirm_wait();
+                }
+                else if (remove_dir(spath) == DIR_REMOVED)
                 {
                     clear_terminal();
                     printf("Structure removed succesfully");
-                }
-                printf("\nfeature not available yet\n");                
+                }               
                 break;
             }
             case 4:
             {
-                //TODO edit code for editing existing strctures
+                //TODO bug found : when entering a structure which is non existant it is calling operations function with structure folder as path
                 char sname[NAME_MAX]="\0";
                 list_contents(path);
                 printf("\nEnter the structure name to edit :");
                 scanf(" %[^\n]%*c",sname);
-                update_path(path,sname,FORWARD,NEEDFS);
-                operator(path);
-                printf("\nfeature not available yet\n");                
+                if (update_path(path,sname,FORWARD,NEEDFS) == DIR_NEXISTS)
+                {
+                    confirm_wait();
+                }
+                else
+                {
+
+                    operator(path);
+                }
                 break;
             }    
             case 5:
