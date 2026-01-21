@@ -311,6 +311,8 @@ int update_path(char *cpath, char *addon, int movement, int slash_flag)
 }
 
 //function to generate a new path with current path and addon
+//
+//Return Value : This function returns the index of the null character in the result path
 int generate_path(char *rpath, char *cpath, char *addon)
 {
     int index_of_null = 0;
@@ -445,6 +447,7 @@ int create_directory(char *cpath)
     else if (dir_is_struct == 1)
     {
         generate_path(gen_pathstring,cpath,dname);
+        generate_path(gen_pathstring,gen_pathstring,"/\0");
         if(!mkdir(gen_pathstring,0755))
         {
             return DIR_CREATED;
@@ -805,6 +808,7 @@ void operator(char *cpath)
             }
             case 3:
             {
+                //TODO make this feature available (It is not ready yet)
                 int temp = create_file(cpath,IS_SCRIPT);
                 clear_terminal();
                 if(temp == FILE_CREATED)
@@ -824,6 +828,7 @@ void operator(char *cpath)
             }
             case 5:
             {
+                //TODO goes back behind structures directory (make sure user cannot go behind structures directory)
                 update_path(cpath,"\0",BACKWARD,NEEDFS);
                 break;
             }
@@ -995,7 +1000,6 @@ int main()
                 }
                 else
                 {
-
                     operator(path);
                 }
                 break;
