@@ -24,7 +24,36 @@ fi
 if ! command -v go &> /dev/null; then
     echo "Go not found. Installing golang..."
     apt-get install -y golang
+else#!/bin/bash
+echo ">>> Starting pre-installation system setup..."
+
+# 1. Update package lists and install C compiler / build tools
+sudo apt-get update
+sudo apt-get install -y build-essential gcc curl wget git
+
+# 2. Check for Go installation. If missing, download and install it.
+if ! command -v go &> /dev/null
+then
+    echo ">>> Go is not installed. Fetching the official Go binary..."
+    wget https://go.dev/dl/go1.22.1.linux-amd64.tar.gz
+    
+    echo ">>> Extracting Go to /usr/local..."
+    sudo tar -C /usr/local -xzf go1.22.1.linux-amd64.tar.gz
+    rm go1.22.1.linux-amd64.tar.gz
+    
+    # Add Go to the environment paths
+    echo "export PATH=\$PATH:/usr/local/go/bin" >> ~/.profile
+    echo "export PATH=\$PATH:/usr/local/go/bin" >> ~/.bashrc
+    export PATH=$PATH:/usr/local/go/bin
+    
+    echo ">>> Go installed successfully."
 else
+    echo ">>> Go is already installed: $(go version)"
+fi
+
+echo ""
+echo ">>> Pre-installation complete!"
+echo ">>> IMPORTANT: Please run 'source ~/.bashrc' or restart your terminal before running install.sh."
     echo "Go is already installed."
 fi
 
