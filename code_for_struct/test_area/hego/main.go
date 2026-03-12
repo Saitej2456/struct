@@ -33,6 +33,7 @@ import (
 
 // --- GLOBALS ---
 var rootPath string
+var p *tea.Program // Global reference to send messages from background Goroutines
 
 // --- ASYNC JOB TRACKING ---
 type JobTracker struct {
@@ -78,8 +79,9 @@ const (
 	statePopupUploadConfirm
 	statePopupCollisionChoice
 	stateProgress
-	stateTransferMenu       // NEW: Send/Receive Submenu
-	stateShowWormholeCode   // NEW: Displaying the generated code
+	stateTransferMenu
+	stateShowWormholeCode
+	statePopupVerifyWormhole // NEW: Interrupt state for MITM verification
 )
 
 type inputMode int
@@ -93,7 +95,7 @@ const (
 	modeRename
 	modeManualRenameUpload
 	modeSetPriority
-	modeReceiveCode // NEW: Input mode for entering wormhole code
+	modeReceiveCode
 )
 
 // --- STYLES ---
@@ -138,7 +140,7 @@ type model struct {
 
 	uploadMenuChoices []string
 	uploadMenuCursor  int
-	
+
 	transferMenuChoices []string
 	transferMenuCursor  int
 
@@ -152,7 +154,7 @@ type model struct {
 	offlineBrowserMode bool
 
 	// Active Scripts
-	activeScripts map[string]int 
+	activeScripts map[string]int
 
 	// Popups
 	pendingDeletePath string
@@ -163,9 +165,11 @@ type model struct {
 	collisionChoice   int
 
 	// Wormhole P2P State
-	wormholeCode string
-	sendCtx      context.Context
-	sendCancel   context.CancelFunc
+	wormholeCode         string
+	sendCtx              context.Context
+	sendCancel           context.CancelFunc
+	wormholeVerifier     string      // NEW: Stores the PAKE verifier code
+	verifierResponseChan chan<- bool // NEW: Channel to unblock the Goroutine
 }
 
 // --- INIT ---
@@ -196,16 +200,23 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-type editorFinishedMsg struct { err error }
+type editorFinishedMsg struct{ err error }
 
-type editorCmdWrap struct { *exec.Cmd }
+type editorCmdWrap struct{ *exec.Cmd }
+
 func (w editorCmdWrap) SetStdin(r io.Reader)   { w.Cmd.Stdin = r }
 func (w editorCmdWrap) SetStdout(wr io.Writer) { w.Cmd.Stdout = wr }
 func (w editorCmdWrap) SetStderr(wr io.Writer) { w.Cmd.Stderr = wr }
 
 type wormholeCodeMsg string
 
-// --- PROGRESS TRACKING WRITER (For Receiving Files) ---
+// NEW: Message sent from the background Goroutine to prompt the UI
+type verifierPromptMsg struct {
+	Verifier     string
+	ResponseChan chan<- bool
+}
+
+// --- PROGRESS TRACKING WRITER ---
 type progressWriter struct {
 	io.Writer
 	total   int64
@@ -213,8 +224,8 @@ type progressWriter struct {
 	job     *JobTracker
 }
 
-func (pw *progressWriter) Write(p []byte) (int, error) {
-	n, err := pw.Writer.Write(p)
+func (pw *progressWriter) Write(pr []byte) (int, error) {
+	n, err := pw.Writer.Write(pr)
 	pw.written += int64(n)
 	if pw.total > 0 {
 		pw.job.Progress = float64(pw.written) / float64(pw.total)
@@ -222,12 +233,26 @@ func (pw *progressWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-/// --- P2P MAGIC WORMHOLE LOGIC ---
+// --- P2P MAGIC WORMHOLE LOGIC ---
 func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) tea.Cmd {
 	return func() tea.Msg {
-		var c wormhole.Client
-		
-		// 1. Open the file to pass to the wormhole sender
+		c := wormhole.Client{
+			// The hook that stops execution right after PAKE handshake
+			VerifierOk: func(verifier string) bool {
+				job.Status = "Awaiting Verification..."
+				respChan := make(chan bool)
+				p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
+				
+				approved := <-respChan // Wait for Bubble Tea UI to reply
+				if approved {
+					job.Status = "Transferring..."
+				} else {
+					job.Status = "Verification Rejected"
+				}
+				return approved
+			},
+		}
+
 		f, err := os.Open(filePath)
 		if err != nil {
 			job.Status = "Error: " + err.Error()
@@ -235,7 +260,6 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 			return wormholeCodeMsg("Error opening file.")
 		}
 
-		// 2. SendFile requires (context, filename, ReadSeeker)
 		fileName := filepath.Base(filePath)
 		code, statusChan, err := c.SendFile(ctx, fileName, f)
 		if err != nil {
@@ -245,12 +269,11 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 			return wormholeCodeMsg("Error generating code.")
 		}
 
-		// 3. Run the waiter in the background so we don't block the UI
 		go func() {
-			defer f.Close() // Keep file open until transfer completes
+			defer f.Close()
 			job.Status = "Waiting for peer to connect..."
-			
-			res := <-statusChan // Wait for the transfer to finish
+
+			res := <-statusChan
 			if res.Error != nil {
 				job.Status = "Failed: " + res.Error.Error()
 			} else {
@@ -260,15 +283,28 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 			job.IsDone = true
 		}()
 
-		// Immediately return the generated code to Bubble Tea
 		return wormholeCodeMsg(code)
 	}
 }
 
 func receiveWormhole(code string, destDir string, job *JobTracker) {
-	var c wormhole.Client
+	c := wormhole.Client{
+		VerifierOk: func(verifier string) bool {
+			job.Status = "Awaiting Verification..."
+			respChan := make(chan bool)
+			p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
+			
+			approved := <-respChan
+			if approved {
+				job.Status = "Downloading..."
+			} else {
+				job.Status = "Verification Rejected"
+			}
+			return approved
+		},
+	}
 	ctx := context.Background()
-	
+
 	job.Status = "Connecting to peer..."
 	msg, err := c.Receive(ctx, code)
 	if err != nil {
@@ -276,8 +312,7 @@ func receiveWormhole(code string, destDir string, job *JobTracker) {
 		job.IsDone = true
 		return
 	}
-	
-	// Ensure we are receiving a file, not just text
+
 	if msg.Type != wormhole.TransferFile {
 		msg.Reject()
 		job.Status = "Error: Expected a file."
@@ -285,7 +320,6 @@ func receiveWormhole(code string, destDir string, job *JobTracker) {
 		return
 	}
 
-	job.Status = "Downloading " + msg.Name + "..."
 	destPath := filepath.Join(destDir, msg.Name)
 	f, err := os.Create(destPath)
 	if err != nil {
@@ -296,11 +330,8 @@ func receiveWormhole(code string, destDir string, job *JobTracker) {
 	}
 	defer f.Close()
 
-	// Wrap the file in our custom progress tracker
-	// msg.TransferBytes is an integer representing the total file size
 	pw := &progressWriter{Writer: f, total: int64(msg.TransferBytes), job: job}
-	
-	// msg implements io.Reader, so we just copy the bytes directly out of it
+
 	_, err = io.Copy(pw, msg)
 	if err != nil {
 		job.Status = "Transfer failed."
@@ -314,16 +345,22 @@ func receiveWormhole(code string, destDir string, job *JobTracker) {
 // --- HELPERS ---
 func getRelPath(root, full string) string {
 	rel, err := filepath.Rel(root, full)
-	if err != nil { return filepath.Base(full) }
+	if err != nil {
+		return filepath.Base(full)
+	}
 	return filepath.ToSlash(rel)
 }
 
 func hashFile(filePath string) (string, error) {
 	f, err := os.Open(filePath)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil { return "", err }
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
@@ -335,7 +372,9 @@ func isStoreExt(ext string) bool {
 // --- CORE PACKAGING LOGIC ---
 func PackStruct(sourceDir string, structName string, destZip string, activeScripts map[string]int) error {
 	zipFile, err := os.Create(destZip)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer zipFile.Close()
 
 	zipWriter := zip.NewWriter(zipFile)
@@ -349,13 +388,17 @@ func PackStruct(sourceDir string, structName string, destZip string, activeScrip
 	blobMap := make(map[string]bool)
 
 	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || path == sourceDir { return nil }
+		if err != nil || path == sourceDir {
+			return nil
+		}
 		relPath, _ := filepath.Rel(sourceDir, path)
 		record := FileRecord{Path: filepath.ToSlash(relPath), IsDir: info.IsDir()}
 
 		if !info.IsDir() {
 			hash, err := hashFile(path)
-			if err != nil { return err }
+			if err != nil {
+				return err
+			}
 			record.Hash = hash
 
 			if !blobMap[hash] {
@@ -363,11 +406,17 @@ func PackStruct(sourceDir string, structName string, destZip string, activeScrip
 				header, _ := zip.FileInfoHeader(info)
 				header.Name = "data/" + hash + ".structdata"
 				header.Method = zip.Deflate
-				if isStoreExt(filepath.Ext(path)) { header.Method = zip.Store }
+				if isStoreExt(filepath.Ext(path)) {
+					header.Method = zip.Store
+				}
 				w, err := zipWriter.CreateHeader(header)
-				if err != nil { return err }
+				if err != nil {
+					return err
+				}
 				src, err := os.Open(path)
-				if err != nil { return err }
+				if err != nil {
+					return err
+				}
 				io.Copy(w, src)
 				src.Close()
 			}
@@ -376,7 +425,9 @@ func PackStruct(sourceDir string, structName string, destZip string, activeScrip
 		return nil
 	})
 
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	yamlData, _ := yaml.Marshal(&manifest)
 	yamlWriter, _ := zipWriter.Create("structure.yaml")
 	yamlWriter.Write(yamlData)
@@ -386,7 +437,9 @@ func PackStruct(sourceDir string, structName string, destZip string, activeScrip
 func PeekManifest(srcZip string) (StructManifest, error) {
 	var m StructManifest
 	r, err := zip.OpenReader(srcZip)
-	if err != nil { return m, err }
+	if err != nil {
+		return m, err
+	}
 	defer r.Close()
 
 	for _, f := range r.File {
@@ -403,11 +456,15 @@ func PeekManifest(srcZip string) (StructManifest, error) {
 
 func UnpackStruct(srcZip string, destDir string) error {
 	r, err := zip.OpenReader(srcZip)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer r.Close()
 
 	manifest, err := PeekManifest(srcZip)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	for _, record := range manifest.Files {
 		fullDest := filepath.Join(destDir, record.Path)
@@ -416,7 +473,7 @@ func UnpackStruct(srcZip string, destDir string) error {
 			continue
 		}
 		os.MkdirAll(filepath.Dir(fullDest), 0755)
-		
+
 		for _, f := range r.File {
 			if f.Name == "data/"+record.Hash+".structdata" {
 				rc, _ := f.Open()
@@ -444,7 +501,9 @@ func deployStructure(zipPath, destDir string, manifest StructManifest, job *JobT
 
 		scripts := manifest.ActiveScripts
 		sort.Slice(scripts, func(i, j int) bool {
-			if scripts[i].Priority != scripts[j].Priority { return scripts[i].Priority > scripts[j].Priority }
+			if scripts[i].Priority != scripts[j].Priority {
+				return scripts[i].Priority > scripts[j].Priority
+			}
 			depthI := strings.Count(scripts[i].Path, "/")
 			depthJ := strings.Count(scripts[j].Path, "/")
 			return depthI < depthJ
@@ -457,7 +516,7 @@ func deployStructure(zipPath, destDir string, manifest StructManifest, job *JobT
 			scriptPath := filepath.Join(destDir, script.Path)
 			cmd := exec.Command("bash", scriptPath)
 			cmd.Dir = destDir
-			
+
 			out, err := cmd.CombinedOutput()
 			logFile.Write(out)
 			if err != nil {
@@ -475,11 +534,15 @@ func deployStructure(zipPath, destDir string, manifest StructManifest, job *JobT
 
 func scanCurrentDir(path string) ([]*FileNode, error) {
 	entries, err := os.ReadDir(path)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	var nodes []*FileNode
 	for _, e := range entries {
 		info, err := e.Info()
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		nodes = append(nodes, &FileNode{Name: e.Name(), Path: filepath.Join(path, e.Name()), IsDir: e.IsDir(), Size: info.Size(), Mode: info.Mode()})
 	}
 	return nodes, nil
@@ -487,7 +550,9 @@ func scanCurrentDir(path string) ([]*FileNode, error) {
 
 func scanStructures(root string) []string {
 	entries, err := os.ReadDir(root)
-	if err != nil { return []string{} }
+	if err != nil {
+		return []string{}
+	}
 	var structs []string
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".struct") {
@@ -507,11 +572,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tickMsg:
-		if m.state == stateProgress { return m, tickCmd() }
+		if m.state == stateProgress {
+			return m, tickCmd()
+		}
 		return m, nil
-	
+
 	case wormholeCodeMsg:
 		m.wormholeCode = string(msg)
+		return m, nil
+
+	case verifierPromptMsg:
+		m.wormholeVerifier = msg.Verifier
+		m.verifierResponseChan = msg.ResponseChan
+		m.confirmToggle = false // Force user to manually tap Left to 'YES'
+		m.state = statePopupVerifyWormhole
 		return m, nil
 
 	case editorFinishedMsg:
@@ -520,34 +594,50 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if m.state != statePopupInput && msg.String() == "ctrl+c" {
-			if m.activeTempDir != "" { os.RemoveAll(m.activeTempDir) }
-			if m.sendCancel != nil { m.sendCancel() }
+			if m.activeTempDir != "" {
+				os.RemoveAll(m.activeTempDir)
+			}
+			if m.sendCancel != nil {
+				m.sendCancel()
+			}
+			// Unblock goroutine to prevent memory leak
+			if m.verifierResponseChan != nil {
+				m.verifierResponseChan <- false
+			}
 			return m, tea.Quit
 		}
 
 		switch m.state {
-		
+
 		case stateMenu:
 			switch msg.String() {
-			case "up", "k": if m.menuCursor > 0 { m.menuCursor-- }
-			case "down", "j": if m.menuCursor < len(m.menuChoices)-1 { m.menuCursor++ }
+			case "up", "k":
+				if m.menuCursor > 0 {
+					m.menuCursor--
+				}
+			case "down", "j":
+				if m.menuCursor < len(m.menuChoices)-1 {
+					m.menuCursor++
+				}
 			case "enter":
 				choice := m.menuChoices[m.menuCursor]
 				if choice == "Exit" {
-					if m.activeTempDir != "" { os.RemoveAll(m.activeTempDir) }
+					if m.activeTempDir != "" {
+						os.RemoveAll(m.activeTempDir)
+					}
 					return m, tea.Quit
 				}
-				
+
 				if choice == "Create Structure" {
 					m.offlineBrowserMode = false
-					m.activeScripts = make(map[string]int) 
+					m.activeScripts = make(map[string]int)
 					m.state = statePopupInput
 					m.activeInMode = modeNewStruct
 					m.textInput.Placeholder = "Enter new structure name..."
 					m.textInput.Reset()
 					return m, nil
 				}
-				
+
 				if choice == "Upload Structure" {
 					m.uploadMenuCursor = 0
 					m.state = stateUploadMenu
@@ -562,16 +652,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if choice == "See Progress" {
 					m.state = stateProgress
-					return m, tickCmd() 
+					return m, tickCmd()
 				}
-				
+
 				m.offlineBrowserMode = false
 				m.structList = scanStructures(rootPath)
 				m.structCursor = 0
 				m.state = stateSelectStruct
-				if choice == "Use Structure" { m.selectMode = "USE" }
-				if choice == "Edit Structure" { m.selectMode = "EDIT" }
-				if choice == "Remove Structure" { m.selectMode = "REMOVE" }
+				if choice == "Use Structure" {
+					m.selectMode = "USE"
+				}
+				if choice == "Edit Structure" {
+					m.selectMode = "EDIT"
+				}
+				if choice == "Remove Structure" {
+					m.selectMode = "REMOVE"
+				}
 			}
 
 		case stateTransferMenu:
@@ -579,9 +675,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "q", "esc":
 				m.state = stateMenu
 			case "up", "k":
-				if m.transferMenuCursor > 0 { m.transferMenuCursor-- }
+				if m.transferMenuCursor > 0 {
+					m.transferMenuCursor--
+				}
 			case "down", "j":
-				if m.transferMenuCursor < len(m.transferMenuChoices)-1 { m.transferMenuCursor++ }
+				if m.transferMenuCursor < len(m.transferMenuChoices)-1 {
+					m.transferMenuCursor++
+				}
 			case "enter":
 				choice := m.transferMenuChoices[m.transferMenuCursor]
 				if choice == "Send Structure" {
@@ -607,27 +707,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateMenu
 			}
 
+		case statePopupVerifyWormhole:
+			switch msg.String() {
+			case "left", "h", "right", "l":
+				m.confirmToggle = !m.confirmToggle
+			case "enter":
+				if m.verifierResponseChan != nil {
+					m.verifierResponseChan <- m.confirmToggle
+					m.verifierResponseChan = nil
+				}
+				if m.confirmToggle {
+					m.state = stateProgress
+					return m, tickCmd()
+				} else {
+					m.state = stateMenu
+					return m, nil
+				}
+			case "esc", "q":
+				if m.verifierResponseChan != nil {
+					m.verifierResponseChan <- false
+					m.verifierResponseChan = nil
+				}
+				m.state = stateMenu
+				return m, nil
+			}
+
 		case stateProgress:
 			switch msg.String() {
-			case "q", "esc": m.state = stateMenu
+			case "q", "esc":
+				m.state = stateMenu
 			}
 
 		case stateUploadMenu:
 			switch msg.String() {
-			case "q", "esc": m.state = stateMenu
-			case "up", "k": if m.uploadMenuCursor > 0 { m.uploadMenuCursor-- }
-			case "down", "j": if m.uploadMenuCursor < len(m.uploadMenuChoices)-1 { m.uploadMenuCursor++ }
+			case "q", "esc":
+				m.state = stateMenu
+			case "up", "k":
+				if m.uploadMenuCursor > 0 {
+					m.uploadMenuCursor--
+				}
+			case "down", "j":
+				if m.uploadMenuCursor < len(m.uploadMenuChoices)-1 {
+					m.uploadMenuCursor++
+				}
 			case "enter":
 				choice := m.uploadMenuChoices[m.uploadMenuCursor]
 				if choice == "Upload to Online" {
-					m.state = stateMenu 
+					m.state = stateMenu
 				} else if choice == "Upload from Offline" {
 					m.offlineBrowserMode = true
 					m.rootConstraint = ""
 					home, _ := os.UserHomeDir()
 					m.currentStructPath = home
 					m.flatFiles, _ = scanCurrentDir(m.currentStructPath)
-					m.activeScripts = make(map[string]int) 
+					m.activeScripts = make(map[string]int)
 					m.fileCursor = 0
 					m.state = stateDashboard
 				}
@@ -635,16 +768,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stateSelectStruct:
 			switch msg.String() {
-			case "q", "esc": m.state = stateMenu
-			case "up", "k": if m.structCursor > 0 { m.structCursor-- }
-			case "down", "j": if m.structCursor < len(m.structList)-1 { m.structCursor++ }
+			case "q", "esc":
+				m.state = stateMenu
+			case "up", "k":
+				if m.structCursor > 0 {
+					m.structCursor--
+				}
+			case "down", "j":
+				if m.structCursor < len(m.structList)-1 {
+					m.structCursor++
+				}
 			case "enter":
-				if len(m.structList) == 0 { return m, nil }
+				if len(m.structList) == 0 {
+					return m, nil
+				}
 				selected := m.structList[m.structCursor]
-				
+
 				if m.selectMode == "SEND" {
 					zipPath := filepath.Join(rootPath, selected+".struct")
-					
+
 					job := &JobTracker{
 						ID:       fmt.Sprintf("%d", time.Now().UnixNano()),
 						Name:     "Send: " + selected,
@@ -652,12 +794,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Progress: 0.0,
 						IsDone:   false,
 					}
-					jobsMutex.Lock(); activeJobs = append(activeJobs, job); jobsMutex.Unlock()
+					jobsMutex.Lock()
+					activeJobs = append(activeJobs, job)
+					jobsMutex.Unlock()
 
 					m.sendCtx, m.sendCancel = context.WithCancel(context.Background())
 					m.wormholeCode = "Generating secure code..."
 					m.state = stateShowWormholeCode
-					
+
 					return m, startSendWormhole(m.sendCtx, zipPath, job)
 				}
 
@@ -673,7 +817,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeStructName = selected
 					m.activeTempDir, _ = os.MkdirTemp("", "struct_workspace_*")
 					zipPath := filepath.Join(rootPath, selected+".struct")
-					
+
 					manifest, _ := PeekManifest(zipPath)
 					m.activeScripts = make(map[string]int)
 					for _, s := range manifest.ActiveScripts {
@@ -692,7 +836,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case stateDashboard:
 			switch msg.String() {
-			case "q": 
+			case "q":
 				if m.offlineBrowserMode {
 					m.offlineBrowserMode = false
 					m.state = stateMenu
@@ -703,8 +847,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeTempDir = ""
 					m.state = stateMenu
 				}
-			case "up", "k": if m.fileCursor > 0 { m.fileCursor-- }
-			case "down", "j": if m.fileCursor < len(m.flatFiles)-1 { m.fileCursor++ }
+			case "up", "k":
+				if m.fileCursor > 0 {
+					m.fileCursor--
+				}
+			case "down", "j":
+				if m.fileCursor < len(m.flatFiles)-1 {
+					m.fileCursor++
+				}
 			case "enter":
 				if len(m.flatFiles) > 0 {
 					selected := m.flatFiles[m.fileCursor]
@@ -723,7 +873,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.fileCursor = 0
 					}
 				} else {
-					if m.currentStructPath != parent { 
+					if m.currentStructPath != parent {
 						m.currentStructPath = parent
 						m.flatFiles, _ = scanCurrentDir(m.currentStructPath)
 						m.fileCursor = 0
@@ -739,13 +889,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.state = statePopupUploadConfirm
 					}
 				}
-			
+
 			case "v", "n":
 				if !m.offlineBrowserMode && len(m.flatFiles) > 0 {
 					selected := m.flatFiles[m.fileCursor]
 					if !selected.IsDir {
 						editor := "vim"
-						if msg.String() == "n" { editor = "nano" }
+						if msg.String() == "n" {
+							editor = "nano"
+						}
 						fullPath := filepath.Join(m.currentStructPath, selected.Name)
 						cmd := exec.Command(editor, fullPath)
 						return m, tea.Exec(editorCmdWrap{cmd}, func(err error) tea.Msg { return editorFinishedMsg{err} })
@@ -757,8 +909,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					f := m.flatFiles[m.fileCursor]
 					if !f.IsDir && strings.HasSuffix(f.Name, ".sh") {
 						rel := getRelPath(m.rootConstraint, f.Path)
-						if _, exists := m.activeScripts[rel]; exists { delete(m.activeScripts, rel)
-						} else { m.activeScripts[rel] = 0 }
+						if _, exists := m.activeScripts[rel]; exists {
+							delete(m.activeScripts, rel)
+						} else {
+							m.activeScripts[rel] = 0
+						}
 					}
 				}
 			case "p":
@@ -775,17 +930,48 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 
-			case "c": if !m.offlineBrowserMode { m.state = statePopupInput; m.activeInMode = modeNewFile; m.textInput.Placeholder = "Enter file name..."; m.textInput.Reset() }
-			case "C": if !m.offlineBrowserMode { m.state = statePopupInput; m.activeInMode = modeNewDir; m.textInput.Placeholder = "Enter directory name..."; m.textInput.Reset() }
-			case "s": if !m.offlineBrowserMode { m.state = statePopupInput; m.activeInMode = modeNewScript; m.textInput.Placeholder = "Enter script name (no .sh)..."; m.textInput.Reset() }
-			case "r": if !m.offlineBrowserMode && len(m.flatFiles) > 0 { m.state = statePopupInput; m.activeInMode = modeRename; m.textInput.Placeholder = "Enter new name..."; m.textInput.Reset() }
-			case "d": if !m.offlineBrowserMode && len(m.flatFiles) > 0 { m.pendingDeletePath = m.flatFiles[m.fileCursor].Name; m.confirmToggle = true; m.state = statePopupConfirm }
+			case "c":
+				if !m.offlineBrowserMode {
+					m.state = statePopupInput
+					m.activeInMode = modeNewFile
+					m.textInput.Placeholder = "Enter file name..."
+					m.textInput.Reset()
+				}
+			case "C":
+				if !m.offlineBrowserMode {
+					m.state = statePopupInput
+					m.activeInMode = modeNewDir
+					m.textInput.Placeholder = "Enter directory name..."
+					m.textInput.Reset()
+				}
+			case "s":
+				if !m.offlineBrowserMode {
+					m.state = statePopupInput
+					m.activeInMode = modeNewScript
+					m.textInput.Placeholder = "Enter script name (no .sh)..."
+					m.textInput.Reset()
+				}
+			case "r":
+				if !m.offlineBrowserMode && len(m.flatFiles) > 0 {
+					m.state = statePopupInput
+					m.activeInMode = modeRename
+					m.textInput.Placeholder = "Enter new name..."
+					m.textInput.Reset()
+				}
+			case "d":
+				if !m.offlineBrowserMode && len(m.flatFiles) > 0 {
+					m.pendingDeletePath = m.flatFiles[m.fileCursor].Name
+					m.confirmToggle = true
+					m.state = statePopupConfirm
+				}
 			}
 
 		case statePopupUploadConfirm:
 			switch msg.String() {
-			case "left", "h", "right", "l": m.confirmToggle = !m.confirmToggle
-			case "esc", "q": m.state = stateDashboard
+			case "left", "h", "right", "l":
+				m.confirmToggle = !m.confirmToggle
+			case "esc", "q":
+				m.state = stateDashboard
 			case "enter":
 				if m.confirmToggle {
 					destFile := filepath.Join(rootPath, m.pendingUploadName+".struct")
@@ -794,7 +980,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.state = statePopupCollisionChoice
 					} else {
 						PackStruct(m.pendingUploadPath, m.pendingUploadName, destFile, m.activeScripts)
-						m.state = stateDashboard 
+						m.state = stateDashboard
 					}
 				} else {
 					m.state = stateDashboard
@@ -803,28 +989,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case statePopupCollisionChoice:
 			switch msg.String() {
-			case "left", "h": if m.collisionChoice > 0 { m.collisionChoice-- }
-			case "right", "l": if m.collisionChoice < 2 { m.collisionChoice++ }
-			case "esc", "q": m.state = stateDashboard
+			case "left", "h":
+				if m.collisionChoice > 0 {
+					m.collisionChoice--
+				}
+			case "right", "l":
+				if m.collisionChoice < 2 {
+					m.collisionChoice++
+				}
+			case "esc", "q":
+				m.state = stateDashboard
 			case "enter":
-				if m.collisionChoice == 0 { 
+				if m.collisionChoice == 0 {
 					baseName := m.pendingUploadName
 					finalName := baseName
 					counter := 1
 					for {
 						finalName = fmt.Sprintf("%s%d", baseName, counter)
-						if _, err := os.Stat(filepath.Join(rootPath, finalName+".struct")); os.IsNotExist(err) { break }
+						if _, err := os.Stat(filepath.Join(rootPath, finalName+".struct")); os.IsNotExist(err) {
+							break
+						}
 						counter++
 					}
 					dest := filepath.Join(rootPath, finalName+".struct")
 					PackStruct(m.pendingUploadPath, finalName, dest, m.activeScripts)
 					m.state = stateDashboard
-				} else if m.collisionChoice == 1 { 
+				} else if m.collisionChoice == 1 {
 					m.state = statePopupInput
 					m.activeInMode = modeManualRenameUpload
 					m.textInput.Placeholder = "Enter new structure name..."
 					m.textInput.Reset()
-				} else if m.collisionChoice == 2 { 
+				} else if m.collisionChoice == 2 {
 					dest := filepath.Join(rootPath, m.pendingUploadName+".struct")
 					PackStruct(m.pendingUploadPath, m.pendingUploadName, dest, m.activeScripts)
 					m.state = stateDashboard
@@ -834,10 +1029,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case statePopupInput:
 			switch msg.String() {
 			case "esc":
-				if m.activeInMode == modeNewStruct || m.activeInMode == modeReceiveCode { m.state = stateMenu } else { m.state = stateDashboard }
+				if m.activeInMode == modeNewStruct || m.activeInMode == modeReceiveCode {
+					m.state = stateMenu
+				} else {
+					m.state = stateDashboard
+				}
 			case "enter":
 				val := m.textInput.Value()
-				
+
 				if m.activeInMode == modeReceiveCode {
 					job := &JobTracker{
 						ID:       fmt.Sprintf("%d", time.Now().UnixNano()),
@@ -846,9 +1045,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						Progress: 0.0,
 						IsDone:   false,
 					}
-					jobsMutex.Lock(); activeJobs = append(activeJobs, job); jobsMutex.Unlock()
+					jobsMutex.Lock()
+					activeJobs = append(activeJobs, job)
+					jobsMutex.Unlock()
 
-					// Start background reception
 					go receiveWormhole(val, rootPath, job)
 					m.state = stateProgress
 					return m, tickCmd()
@@ -881,12 +1081,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateDashboard
 					return m, nil
 				}
-				
+
 				cName := C.CString(val)
 				cPath := C.CString(m.currentStructPath)
-				
-				if m.activeInMode == modeNewFile { C.Bridge_CreateFile(cPath, cName) } else if m.activeInMode == modeNewDir { C.Bridge_CreateDir(cPath, cName) } else if m.activeInMode == modeNewScript {
-					if !strings.HasSuffix(val, ".sh") { C.free(unsafe.Pointer(cName)); val += ".sh"; cName = C.CString(val) }
+
+				if m.activeInMode == modeNewFile {
+					C.Bridge_CreateFile(cPath, cName)
+				} else if m.activeInMode == modeNewDir {
+					C.Bridge_CreateDir(cPath, cName)
+				} else if m.activeInMode == modeNewScript {
+					if !strings.HasSuffix(val, ".sh") {
+						C.free(unsafe.Pointer(cName))
+						val += ".sh"
+						cName = C.CString(val)
+					}
 					C.Bridge_CreateScript(cPath, cName)
 				} else if m.activeInMode == modeRename {
 					selectedName := m.flatFiles[m.fileCursor].Name
@@ -916,7 +1124,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case statePopupConfirm:
 			switch msg.String() {
-			case "left", "h", "right", "l": m.confirmToggle = !m.confirmToggle
+			case "left", "h", "right", "l":
+				m.confirmToggle = !m.confirmToggle
 			case "enter":
 				if m.confirmToggle {
 					if m.selectMode == "REMOVE" {
@@ -935,22 +1144,36 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.state = stateDashboard
 					}
 				} else {
-					if m.selectMode == "REMOVE" { m.state = stateSelectStruct } else { m.state = stateDashboard }
+					if m.selectMode == "REMOVE" {
+						m.state = stateSelectStruct
+					} else {
+						m.state = stateDashboard
+					}
 				}
 			case "esc", "q":
-				if m.selectMode == "REMOVE" { m.state = stateSelectStruct } else { m.state = stateDashboard }
+				if m.selectMode == "REMOVE" {
+					m.state = stateSelectStruct
+				} else {
+					m.state = stateDashboard
+				}
 			}
 
 		case statePopupUseChoice:
 			switch msg.String() {
-			case "left", "h", "right", "l": m.confirmToggle = !m.confirmToggle
-			case "esc", "q": m.state = stateSelectStruct
+			case "left", "h", "right", "l":
+				m.confirmToggle = !m.confirmToggle
+			case "esc", "q":
+				m.state = stateSelectStruct
 			case "enter":
 				cwd, _ := os.Getwd()
 				zipPath := filepath.Join(rootPath, m.pendingUsePath+".struct")
 				var dest string
-				if m.confirmToggle { dest = filepath.Join(cwd, m.pendingUsePath) } else { dest = cwd }
-				
+				if m.confirmToggle {
+					dest = filepath.Join(cwd, m.pendingUsePath)
+				} else {
+					dest = cwd
+				}
+
 				manifest, _ := PeekManifest(zipPath)
 
 				job := &JobTracker{
@@ -960,8 +1183,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Progress: 0.0,
 					IsDone:   false,
 				}
-				
-				jobsMutex.Lock(); activeJobs = append(activeJobs, job); jobsMutex.Unlock()
+
+				jobsMutex.Lock()
+				activeJobs = append(activeJobs, job)
+				jobsMutex.Unlock()
 				go deployStructure(zipPath, dest, manifest, job)
 
 				m.state = stateMenu
@@ -974,21 +1199,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // --- VIEW ---
 func (m model) View() string {
-	if m.state == statePopupInput { return m.viewInputPopup() }
-	if m.state == statePopupConfirm { return m.viewConfirmPopup() }
-	if m.state == statePopupUseChoice { return m.viewUseChoicePopup() }
-	if m.state == statePopupUploadConfirm { return m.viewUploadConfirmPopup() }
-	if m.state == statePopupCollisionChoice { return m.viewCollisionChoicePopup() }
+	if m.state == statePopupInput {
+		return m.viewInputPopup()
+	}
+	if m.state == statePopupConfirm {
+		return m.viewConfirmPopup()
+	}
+	if m.state == statePopupUseChoice {
+		return m.viewUseChoicePopup()
+	}
+	if m.state == statePopupUploadConfirm {
+		return m.viewUploadConfirmPopup()
+	}
+	if m.state == statePopupCollisionChoice {
+		return m.viewCollisionChoicePopup()
+	}
+	if m.state == statePopupVerifyWormhole {
+		return m.viewVerifyWormholePopup()
+	}
 
 	switch m.state {
-	case stateMenu: return m.viewMenu()
-	case stateUploadMenu: return m.viewUploadMenu()
-	case stateTransferMenu: return m.viewTransferMenu()
-	case stateSelectStruct: return m.viewStructList()
-	case stateDashboard: return m.viewDashboard()
-	case stateProgress: return m.viewProgress()
-	case stateShowWormholeCode: return m.viewWormholeCode()
-	default: return m.viewMenu()
+	case stateMenu:
+		return m.viewMenu()
+	case stateUploadMenu:
+		return m.viewUploadMenu()
+	case stateTransferMenu:
+		return m.viewTransferMenu()
+	case stateSelectStruct:
+		return m.viewStructList()
+	case stateDashboard:
+		return m.viewDashboard()
+	case stateProgress:
+		return m.viewProgress()
+	case stateShowWormholeCode:
+		return m.viewWormholeCode()
+	default:
+		return m.viewMenu()
 	}
 }
 
@@ -996,7 +1242,7 @@ func (m model) View() string {
 
 func (m model) viewMenu() string {
 	asciiArt := `
-   ██╗███████╗████████╗██████╗ ██╗   ██╗ ██████╗████████╗ ██╗██╗  
+  ██╗███████╗████████╗██████╗ ██╗   ██╗ ██████╗████████╗ ██╗██╗  
  ██╔╝██╔════╝╚══██╔══╝██╔══██╗██║   ██║██╔════╝╚══██╔══╝██╔╝╚██╗ 
 ██╔╝ ███████╗   ██║   ██████╔╝██║   ██║██║        ██║  ██╔╝  ╚██╗
 ╚██╗ ╚════██║   ██║   ██╔══██╗██║   ██║██║        ██║ ██╔╝   ██╔╝
@@ -1067,14 +1313,14 @@ func (m model) viewWormholeCode() string {
 	title := titleStyle.Render("SECURE P2P TRANSFER")
 	instruction := "Share this code with the receiver:\n(Transfer will start automatically when they connect)"
 	codeBox := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(highlight).Padding(1, 4).Render(m.wormholeCode)
-	
+
 	content := lipgloss.JoinVertical(lipgloss.Center, title, "\n", instruction, "\n", codeBox, "\n\n(Press 'q' or 'esc' to cancel)")
 	return m.centerPopup(content)
 }
 
 func (m model) viewProgress() string {
 	s := titleStyle.Render("ACTIVE TASKS PROGRESS") + "\n\n"
-	
+
 	jobsMutex.Lock()
 	if len(activeJobs) == 0 {
 		s += itemStyle.Render("No background tasks running.") + "\n"
@@ -1082,11 +1328,13 @@ func (m model) viewProgress() string {
 		for _, job := range activeJobs {
 			barWidth := 30
 			filled := int(job.Progress * float64(barWidth))
-			if filled > barWidth { filled = barWidth }
-			
+			if filled > barWidth {
+				filled = barWidth
+			}
+
 			bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
 			statusLine := fmt.Sprintf("[%s] %s - %s", bar, job.Name, job.Status)
-			
+
 			if job.IsDone {
 				s += selectedItemStyle.Render(statusLine) + "\n"
 			} else {
@@ -1103,17 +1351,43 @@ func (m model) centerPopup(content string) string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, popupBoxStyle.Render(content), lipgloss.WithWhitespaceChars(" "), lipgloss.WithWhitespaceForeground(subtle))
 }
 
+func (m model) viewVerifyWormholePopup() string {
+	question := fmt.Sprintf("SECURITY VERIFICATION\n\nDoes the peer see this exact fingerprint?\n\n%s",
+		lipgloss.NewStyle().Foreground(highlight).Bold(true).Render(m.wormholeVerifier))
+
+	var yesBtn, noBtn string
+	if m.confirmToggle {
+		yesBtn = activeButtonStyle.Render("YES (Match)")
+		noBtn = buttonStyle.Render("NO (Abort)")
+	} else {
+		yesBtn = buttonStyle.Render("YES (Match)")
+		noBtn = activeButtonStyle.Render("NO (Abort)")
+	}
+
+	buttons := lipgloss.JoinHorizontal(lipgloss.Center, yesBtn, noBtn)
+	content := lipgloss.JoinVertical(lipgloss.Center, question, "\n", buttons)
+	return m.centerPopup(content)
+}
+
 func (m model) viewInputPopup() string {
 	var title string
 	switch m.activeInMode {
-	case modeNewStruct: title = "Name for New Structure"
-	case modeNewFile: title = "Create New File"
-	case modeNewDir: title = "Create New Directory"
-	case modeNewScript: title = "Create Script (No .sh extension)"
-	case modeRename: title = "Rename Item"
-	case modeManualRenameUpload: title = "Structure collision. Enter new name:"
-	case modeSetPriority: title = "Set Execution Priority (High Number = First)"
-	case modeReceiveCode: title = "Enter Wormhole Code from Sender:"
+	case modeNewStruct:
+		title = "Name for New Structure"
+	case modeNewFile:
+		title = "Create New File"
+	case modeNewDir:
+		title = "Create New Directory"
+	case modeNewScript:
+		title = "Create Script (No .sh extension)"
+	case modeRename:
+		title = "Rename Item"
+	case modeManualRenameUpload:
+		title = "Structure collision. Enter new name:"
+	case modeSetPriority:
+		title = "Set Execution Priority (High Number = First)"
+	case modeReceiveCode:
+		title = "Enter Wormhole Code from Sender:"
 	}
 	content := lipgloss.JoinVertical(lipgloss.Center, titleStyle.Render(title), "\n", m.textInput.View(), "\n\n(Enter to confirm, Esc to cancel)")
 	return m.centerPopup(content)
@@ -1122,7 +1396,13 @@ func (m model) viewInputPopup() string {
 func (m model) viewConfirmPopup() string {
 	question := fmt.Sprintf("Are you sure you want to delete:\n\n'%s'?", m.pendingDeletePath)
 	var yesBtn, noBtn string
-	if m.confirmToggle { yesBtn = activeButtonStyle.Render("YES"); noBtn = buttonStyle.Render("NO") } else { yesBtn = buttonStyle.Render("YES"); noBtn = activeButtonStyle.Render("NO") }
+	if m.confirmToggle {
+		yesBtn = activeButtonStyle.Render("YES")
+		noBtn = buttonStyle.Render("NO")
+	} else {
+		yesBtn = buttonStyle.Render("YES")
+		noBtn = activeButtonStyle.Render("NO")
+	}
 	buttons := lipgloss.JoinHorizontal(lipgloss.Center, yesBtn, noBtn)
 	content := lipgloss.JoinVertical(lipgloss.Center, question, "\n", buttons)
 	return m.centerPopup(content)
@@ -1131,7 +1411,13 @@ func (m model) viewConfirmPopup() string {
 func (m model) viewUploadConfirmPopup() string {
 	question := fmt.Sprintf("Are you sure you want to upload:\n\n'%s'?", m.pendingUploadName)
 	var yesBtn, noBtn string
-	if m.confirmToggle { yesBtn = activeButtonStyle.Render("YES"); noBtn = buttonStyle.Render("NO") } else { yesBtn = buttonStyle.Render("YES"); noBtn = activeButtonStyle.Render("NO") }
+	if m.confirmToggle {
+		yesBtn = activeButtonStyle.Render("YES")
+		noBtn = buttonStyle.Render("NO")
+	} else {
+		yesBtn = buttonStyle.Render("YES")
+		noBtn = activeButtonStyle.Render("NO")
+	}
 	buttons := lipgloss.JoinHorizontal(lipgloss.Center, yesBtn, noBtn)
 	content := lipgloss.JoinVertical(lipgloss.Center, question, "\n", buttons)
 	return m.centerPopup(content)
@@ -1143,11 +1429,17 @@ func (m model) viewCollisionChoicePopup() string {
 	autoBtn = buttonStyle.Render("AUTO RENAME")
 	manualBtn = buttonStyle.Render("MANUAL RENAME")
 	overBtn = buttonStyle.Render("OVERWRITE")
-	
-	if m.collisionChoice == 0 { autoBtn = activeButtonStyle.Render("AUTO RENAME") }
-	if m.collisionChoice == 1 { manualBtn = activeButtonStyle.Render("MANUAL RENAME") }
-	if m.collisionChoice == 2 { overBtn = activeButtonStyle.Render("OVERWRITE") }
-	
+
+	if m.collisionChoice == 0 {
+		autoBtn = activeButtonStyle.Render("AUTO RENAME")
+	}
+	if m.collisionChoice == 1 {
+		manualBtn = activeButtonStyle.Render("MANUAL RENAME")
+	}
+	if m.collisionChoice == 2 {
+		overBtn = activeButtonStyle.Render("OVERWRITE")
+	}
+
 	buttons := lipgloss.JoinHorizontal(lipgloss.Center, autoBtn, manualBtn, overBtn)
 	content := lipgloss.JoinVertical(lipgloss.Center, question, "\n", buttons)
 	return m.centerPopup(content)
@@ -1156,7 +1448,13 @@ func (m model) viewCollisionChoicePopup() string {
 func (m model) viewUseChoicePopup() string {
 	question := fmt.Sprintf("How do you want to use '%s'?", m.pendingUsePath)
 	var dirBtn, contentBtn string
-	if m.confirmToggle { dirBtn = activeButtonStyle.Render("AS DIRECTORY"); contentBtn = buttonStyle.Render("CONTENTS ONLY") } else { dirBtn = buttonStyle.Render("AS DIRECTORY"); contentBtn = activeButtonStyle.Render("CONTENTS ONLY") }
+	if m.confirmToggle {
+		dirBtn = activeButtonStyle.Render("AS DIRECTORY")
+		contentBtn = buttonStyle.Render("CONTENTS ONLY")
+	} else {
+		dirBtn = buttonStyle.Render("AS DIRECTORY")
+		contentBtn = activeButtonStyle.Render("CONTENTS ONLY")
+	}
 	buttons := lipgloss.JoinHorizontal(lipgloss.Center, dirBtn, contentBtn)
 	content := lipgloss.JoinVertical(lipgloss.Center, question, "\n", buttons)
 	return m.centerPopup(content)
@@ -1171,11 +1469,25 @@ func (m model) viewDashboard() string {
 		fileList = "Directory is empty."
 	} else {
 		start, end := 0, len(m.flatFiles)
-		if end > 12 { if m.fileCursor > 6 { start = m.fileCursor - 6 }; if start+12 < end { end = start + 12 } else { end = len(m.flatFiles); if end-12>=0 { start=end-12 } } }
+		if end > 12 {
+			if m.fileCursor > 6 {
+				start = m.fileCursor - 6
+			}
+			if start+12 < end {
+				end = start + 12
+			} else {
+				end = len(m.flatFiles)
+				if end-12 >= 0 {
+					start = end - 12
+				}
+			}
+		}
 		for i := start; i < end; i++ {
 			f := m.flatFiles[i]
 			icon := "📄"
-			if f.IsDir { icon = "📁" }
+			if f.IsDir {
+				icon = "📁"
+			}
 			line := fmt.Sprintf("%s %s", icon, f.Name)
 
 			if !f.IsDir && strings.HasSuffix(f.Name, ".sh") && !m.offlineBrowserMode {
@@ -1185,14 +1497,20 @@ func (m model) viewDashboard() string {
 				}
 			}
 
-			if i == m.fileCursor { fileList += selectedItemStyle.Render("> " + line) + "\n" } else { fileList += itemStyle.Render("  " + line) + "\n" }
+			if i == m.fileCursor {
+				fileList += selectedItemStyle.Render("> " + line) + "\n"
+			} else {
+				fileList += itemStyle.Render("  " + line) + "\n"
+			}
 		}
 	}
 	leftBox := boxStyle.Width(halfWidth).Height(14).Render(fileList)
 
 	displayPath := m.currentStructPath
-	if !m.offlineBrowserMode { displayPath = strings.Replace(m.currentStructPath, m.rootConstraint, "[WORKSPACE: "+m.activeStructName+"]", 1) }
-	
+	if !m.offlineBrowserMode {
+		displayPath = strings.Replace(m.currentStructPath, m.rootConstraint, "[WORKSPACE: "+m.activeStructName+"]", 1)
+	}
+
 	metaContent := fmt.Sprintf("CURRENT LOCATION\n\n%s\n\nItems: %d", displayPath, len(m.flatFiles))
 	rightBox := boxStyle.Width(halfWidth).Height(14).Render(metaContent)
 
@@ -1202,7 +1520,7 @@ func (m model) viewDashboard() string {
 	if len(m.flatFiles) > 0 {
 		f := m.flatFiles[m.fileCursor]
 		extraMeta := ""
-		
+
 		if !f.IsDir && strings.HasSuffix(f.Name, ".sh") && !m.offlineBrowserMode {
 			rel := getRelPath(m.rootConstraint, f.Path)
 			if prio, exists := m.activeScripts[rel]; exists {
@@ -1211,8 +1529,15 @@ func (m model) viewDashboard() string {
 				extraMeta = "\nActive: NO"
 			}
 		}
-		fileMetaContent = fmt.Sprintf("SELECTED INFO\n\nName: %s\nType: %s\nPermissions: %s\nSize: %d bytes%s", f.Name, func() string { if f.IsDir { return "Directory" }; return "File" }(), f.Mode, f.Size, extraMeta)
-	} else { fileMetaContent = "No file selected." }
+		fileMetaContent = fmt.Sprintf("SELECTED INFO\n\nName: %s\nType: %s\nPermissions: %s\nSize: %d bytes%s", f.Name, func() string {
+			if f.IsDir {
+				return "Directory"
+			}
+			return "File"
+		}(), f.Mode, f.Size, extraMeta)
+	} else {
+		fileMetaContent = "No file selected."
+	}
 	middleSection := boxStyle.Width(w-2).Height(6).Render(fileMetaContent)
 
 	var keysText string
@@ -1237,7 +1562,8 @@ func main() {
 	rootPath = filepath.Join(home, ".struct", "structures")
 	os.MkdirAll(rootPath, 0755)
 
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	// We assign this to the global 'p' so background workers can message the UI
+	p = tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Error:", err)
 		os.Exit(1)
