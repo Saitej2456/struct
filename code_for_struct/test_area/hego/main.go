@@ -235,13 +235,19 @@ func (pw *progressWriter) Write(pr []byte) (int, error) {
 // --- P2P MAGIC WORMHOLE LOGIC ---
 func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) tea.Cmd {
 	return func() tea.Msg {
-		var localReject bool // Flag to track if the UI explicitly aborted
+		var localReject bool 
 
 		c := wormhole.Client{
 			VerifierOk: func(verifier string) bool {
+				// Slice the raw 64-char hash down to a readable 6-char code
+				shortVerifier := verifier
+				if len(verifier) >= 6 {
+					shortVerifier = strings.ToUpper(verifier[:6])
+				}
+
 				job.Status = "Awaiting Verification..."
 				respChan := make(chan bool)
-				p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
+				p.Send(verifierPromptMsg{Verifier: shortVerifier, ResponseChan: respChan})
 				
 				approved := <-respChan 
 				if approved {
@@ -276,7 +282,6 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 			res := <-statusChan
 			if res.Error != nil {
 				errMsg := res.Error.Error()
-				// Intercept the library's hardcoded error string
 				if localReject {
 					job.Status = "Failed: You aborted verification."
 				} else if strings.Contains(errMsg, "rejected") || strings.Contains(errMsg, "abandoned") || strings.Contains(errMsg, "verification") {
@@ -298,13 +303,19 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 }
 
 func receiveWormhole(code string, destDir string, job *JobTracker) {
-	var localReject bool // Flag to track if the UI explicitly aborted
+	var localReject bool 
 
 	c := wormhole.Client{
 		VerifierOk: func(verifier string) bool {
+			// Slice the raw 64-char hash down to a readable 6-char code
+			shortVerifier := verifier
+			if len(verifier) >= 6 {
+				shortVerifier = strings.ToUpper(verifier[:6])
+			}
+
 			job.Status = "Awaiting Verification..."
 			respChan := make(chan bool)
-			p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
+			p.Send(verifierPromptMsg{Verifier: shortVerifier, ResponseChan: respChan})
 			
 			approved := <-respChan
 			if approved {
@@ -321,7 +332,6 @@ func receiveWormhole(code string, destDir string, job *JobTracker) {
 	msg, err := c.Receive(ctx, code)
 	if err != nil {
 		errMsg := err.Error()
-		// Intercept the library's hardcoded error string
 		if localReject {
 			job.Status = "Failed: You aborted verification."
 		} else if strings.Contains(errMsg, "rejected") || strings.Contains(errMsg, "abandoned") || strings.Contains(errMsg, "verification") {
