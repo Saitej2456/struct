@@ -33,14 +33,14 @@ import (
 
 // --- GLOBALS ---
 var rootPath string
-var p *tea.Program // Global reference to send messages from background Goroutines
+var p *tea.Program
 
 // --- ASYNC JOB TRACKING ---
 type JobTracker struct {
 	ID       string
 	Name     string
 	Status   string
-	Progress float64 // 0.0 to 1.0
+	Progress float64
 	IsDone   bool
 }
 
@@ -81,7 +81,7 @@ const (
 	stateProgress
 	stateTransferMenu
 	stateShowWormholeCode
-	statePopupVerifyWormhole // NEW: Interrupt state for MITM verification
+	statePopupVerifyWormhole
 )
 
 type inputMode int
@@ -144,7 +144,6 @@ type model struct {
 	transferMenuChoices []string
 	transferMenuCursor  int
 
-	// Workspace & Navigation
 	activeStructName   string
 	activeTempDir      string
 	currentStructPath  string
@@ -153,10 +152,8 @@ type model struct {
 	fileCursor         int
 	offlineBrowserMode bool
 
-	// Active Scripts
 	activeScripts map[string]int
 
-	// Popups
 	pendingDeletePath string
 	pendingUsePath    string
 	pendingUploadPath string
@@ -164,12 +161,11 @@ type model struct {
 	confirmToggle     bool
 	collisionChoice   int
 
-	// Wormhole P2P State
 	wormholeCode         string
 	sendCtx              context.Context
 	sendCancel           context.CancelFunc
-	wormholeVerifier     string      // NEW: Stores the PAKE verifier code
-	verifierResponseChan chan<- bool // NEW: Channel to unblock the Goroutine
+	wormholeVerifier     string
+	verifierResponseChan chan<- bool
 }
 
 // --- INIT ---
@@ -210,7 +206,6 @@ func (w editorCmdWrap) SetStderr(wr io.Writer) { w.Cmd.Stderr = wr }
 
 type wormholeCodeMsg string
 
-// NEW: Message sent from the background Goroutine to prompt the UI
 type verifierPromptMsg struct {
 	Verifier     string
 	ResponseChan chan<- bool
@@ -237,13 +232,18 @@ func (pw *progressWriter) Write(pr []byte) (int, error) {
 func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) tea.Cmd {
 	return func() tea.Msg {
 		c := wormhole.Client{
-			// The hook that stops execution right after PAKE handshake
 			VerifierOk: func(verifier string) bool {
+				// Safely truncate the verifier to 6 characters for human UX
+				shortVerifier := verifier
+				if len(verifier) > 6 {
+					shortVerifier = verifier[:6]
+				}
+
 				job.Status = "Awaiting Verification..."
 				respChan := make(chan bool)
-				p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
+				p.Send(verifierPromptMsg{Verifier: shortVerifier, ResponseChan: respChan})
 				
-				approved := <-respChan // Wait for Bubble Tea UI to reply
+				approved := <-respChan
 				if approved {
 					job.Status = "Transferring..."
 				} else {
@@ -290,9 +290,15 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 func receiveWormhole(code string, destDir string, job *JobTracker) {
 	c := wormhole.Client{
 		VerifierOk: func(verifier string) bool {
+			// Safely truncate the verifier to 6 characters for human UX
+			shortVerifier := verifier
+			if len(verifier) > 6 {
+				shortVerifier = verifier[:6]
+			}
+
 			job.Status = "Awaiting Verification..."
 			respChan := make(chan bool)
-			p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
+			p.Send(verifierPromptMsg{Verifier: shortVerifier, ResponseChan: respChan})
 			
 			approved := <-respChan
 			if approved {
@@ -584,7 +590,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verifierPromptMsg:
 		m.wormholeVerifier = msg.Verifier
 		m.verifierResponseChan = msg.ResponseChan
-		m.confirmToggle = false // Force user to manually tap Left to 'YES'
+		m.confirmToggle = false
 		m.state = statePopupVerifyWormhole
 		return m, nil
 
@@ -600,7 +606,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.sendCancel != nil {
 				m.sendCancel()
 			}
-			// Unblock goroutine to prevent memory leak
 			if m.verifierResponseChan != nil {
 				m.verifierResponseChan <- false
 			}
@@ -1352,8 +1357,10 @@ func (m model) centerPopup(content string) string {
 }
 
 func (m model) viewVerifyWormholePopup() string {
-	question := fmt.Sprintf("SECURITY VERIFICATION\n\nDoes the peer see this exact fingerprint?\n\n%s",
-		lipgloss.NewStyle().Foreground(highlight).Bold(true).Render(m.wormholeVerifier))
+	// Explicitly align each section to the center so Lipgloss doesn't stagger them
+	header := titleStyle.Copy().Align(lipgloss.Center).Render("SECURITY VERIFICATION")
+	body := lipgloss.NewStyle().Align(lipgloss.Center).Render("Does the peer see this exact fingerprint?")
+	code := lipgloss.NewStyle().Foreground(highlight).Bold(true).Align(lipgloss.Center).Render(m.wormholeVerifier)
 
 	var yesBtn, noBtn string
 	if m.confirmToggle {
@@ -1365,7 +1372,9 @@ func (m model) viewVerifyWormholePopup() string {
 	}
 
 	buttons := lipgloss.JoinHorizontal(lipgloss.Center, yesBtn, noBtn)
-	content := lipgloss.JoinVertical(lipgloss.Center, question, "\n", buttons)
+
+	// Stack them vertically, all sharing the center alignment
+	content := lipgloss.JoinVertical(lipgloss.Center, header, "\n", body, "\n", code, "\n", buttons)
 	return m.centerPopup(content)
 }
 
@@ -1562,7 +1571,6 @@ func main() {
 	rootPath = filepath.Join(home, ".struct", "structures")
 	os.MkdirAll(rootPath, 0755)
 
-	// We assign this to the global 'p' so background workers can message the UI
 	p = tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Println("Error:", err)
