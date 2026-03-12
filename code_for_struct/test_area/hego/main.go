@@ -33,14 +33,14 @@ import (
 
 // --- GLOBALS ---
 var rootPath string
-var p *tea.Program
+var p *tea.Program // Global reference to send messages from background Goroutines
 
 // --- ASYNC JOB TRACKING ---
 type JobTracker struct {
 	ID       string
 	Name     string
 	Status   string
-	Progress float64
+	Progress float64 // 0.0 to 1.0
 	IsDone   bool
 }
 
@@ -81,7 +81,7 @@ const (
 	stateProgress
 	stateTransferMenu
 	stateShowWormholeCode
-	statePopupVerifyWormhole
+	statePopupVerifyWormhole 
 )
 
 type inputMode int
@@ -144,6 +144,7 @@ type model struct {
 	transferMenuChoices []string
 	transferMenuCursor  int
 
+	// Workspace & Navigation
 	activeStructName   string
 	activeTempDir      string
 	currentStructPath  string
@@ -152,8 +153,10 @@ type model struct {
 	fileCursor         int
 	offlineBrowserMode bool
 
+	// Active Scripts
 	activeScripts map[string]int
 
+	// Popups
 	pendingDeletePath string
 	pendingUsePath    string
 	pendingUploadPath string
@@ -161,11 +164,12 @@ type model struct {
 	confirmToggle     bool
 	collisionChoice   int
 
+	// Wormhole P2P State
 	wormholeCode         string
 	sendCtx              context.Context
 	sendCancel           context.CancelFunc
-	wormholeVerifier     string
-	verifierResponseChan chan<- bool
+	wormholeVerifier     string      
+	verifierResponseChan chan<- bool 
 }
 
 // --- INIT ---
@@ -231,23 +235,19 @@ func (pw *progressWriter) Write(pr []byte) (int, error) {
 // --- P2P MAGIC WORMHOLE LOGIC ---
 func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) tea.Cmd {
 	return func() tea.Msg {
+		var localReject bool // Flag to track if the UI explicitly aborted
+
 		c := wormhole.Client{
 			VerifierOk: func(verifier string) bool {
-				// Safely truncate the verifier to 6 characters for human UX
-				shortVerifier := verifier
-				if len(verifier) > 6 {
-					shortVerifier = verifier[:6]
-				}
-
 				job.Status = "Awaiting Verification..."
 				respChan := make(chan bool)
-				p.Send(verifierPromptMsg{Verifier: shortVerifier, ResponseChan: respChan})
+				p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
 				
-				approved := <-respChan
+				approved := <-respChan 
 				if approved {
 					job.Status = "Transferring..."
 				} else {
-					job.Status = "Verification Rejected"
+					localReject = true
 				}
 				return approved
 			},
@@ -275,7 +275,17 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 
 			res := <-statusChan
 			if res.Error != nil {
-				job.Status = "Failed: " + res.Error.Error()
+				errMsg := res.Error.Error()
+				// Intercept the library's hardcoded error string
+				if localReject {
+					job.Status = "Failed: You aborted verification."
+				} else if strings.Contains(errMsg, "rejected") || strings.Contains(errMsg, "abandoned") || strings.Contains(errMsg, "verification") {
+					job.Status = "Failed: Peer aborted verification."
+				} else if strings.Contains(errMsg, "context canceled") {
+					job.Status = "Failed: Transfer cancelled."
+				} else {
+					job.Status = "Failed: " + errMsg
+				}
 			} else {
 				job.Status = "Completed"
 				job.Progress = 1.0
@@ -288,23 +298,19 @@ func startSendWormhole(ctx context.Context, filePath string, job *JobTracker) te
 }
 
 func receiveWormhole(code string, destDir string, job *JobTracker) {
+	var localReject bool // Flag to track if the UI explicitly aborted
+
 	c := wormhole.Client{
 		VerifierOk: func(verifier string) bool {
-			// Safely truncate the verifier to 6 characters for human UX
-			shortVerifier := verifier
-			if len(verifier) > 6 {
-				shortVerifier = verifier[:6]
-			}
-
 			job.Status = "Awaiting Verification..."
 			respChan := make(chan bool)
-			p.Send(verifierPromptMsg{Verifier: shortVerifier, ResponseChan: respChan})
+			p.Send(verifierPromptMsg{Verifier: verifier, ResponseChan: respChan})
 			
 			approved := <-respChan
 			if approved {
 				job.Status = "Downloading..."
 			} else {
-				job.Status = "Verification Rejected"
+				localReject = true
 			}
 			return approved
 		},
@@ -314,7 +320,17 @@ func receiveWormhole(code string, destDir string, job *JobTracker) {
 	job.Status = "Connecting to peer..."
 	msg, err := c.Receive(ctx, code)
 	if err != nil {
-		job.Status = "Error: " + err.Error()
+		errMsg := err.Error()
+		// Intercept the library's hardcoded error string
+		if localReject {
+			job.Status = "Failed: You aborted verification."
+		} else if strings.Contains(errMsg, "rejected") || strings.Contains(errMsg, "abandoned") || strings.Contains(errMsg, "verification") {
+			job.Status = "Failed: Peer aborted verification."
+		} else if strings.Contains(errMsg, "context canceled") {
+			job.Status = "Failed: Transfer cancelled."
+		} else {
+			job.Status = "Failed: " + errMsg
+		}
 		job.IsDone = true
 		return
 	}
@@ -590,7 +606,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verifierPromptMsg:
 		m.wormholeVerifier = msg.Verifier
 		m.verifierResponseChan = msg.ResponseChan
-		m.confirmToggle = false
+		m.confirmToggle = false // Force user to manually tap Left to 'YES'
 		m.state = statePopupVerifyWormhole
 		return m, nil
 
@@ -1357,10 +1373,8 @@ func (m model) centerPopup(content string) string {
 }
 
 func (m model) viewVerifyWormholePopup() string {
-	// Explicitly align each section to the center so Lipgloss doesn't stagger them
-	header := titleStyle.Copy().Align(lipgloss.Center).Render("SECURITY VERIFICATION")
-	body := lipgloss.NewStyle().Align(lipgloss.Center).Render("Does the peer see this exact fingerprint?")
-	code := lipgloss.NewStyle().Foreground(highlight).Bold(true).Align(lipgloss.Center).Render(m.wormholeVerifier)
+	question := fmt.Sprintf("SECURITY VERIFICATION\n\nDoes the peer see this exact fingerprint?\n\n%s",
+		lipgloss.NewStyle().Foreground(highlight).Bold(true).Render(m.wormholeVerifier))
 
 	var yesBtn, noBtn string
 	if m.confirmToggle {
@@ -1372,9 +1386,7 @@ func (m model) viewVerifyWormholePopup() string {
 	}
 
 	buttons := lipgloss.JoinHorizontal(lipgloss.Center, yesBtn, noBtn)
-
-	// Stack them vertically, all sharing the center alignment
-	content := lipgloss.JoinVertical(lipgloss.Center, header, "\n", body, "\n", code, "\n", buttons)
+	content := lipgloss.JoinVertical(lipgloss.Center, question, "\n", buttons)
 	return m.centerPopup(content)
 }
 
